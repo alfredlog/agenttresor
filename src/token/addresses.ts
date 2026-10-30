@@ -12,7 +12,7 @@
  * Trade-off (accepted for this kit): holdings are publicly linkable to the
  * identity key.
  */
-import { KeyDeriver, PublicKey, type WalletInterface, type WalletProtocol } from '@bsv/sdk'
+import { KeyDeriver, PublicKey, type WalletInterface, type WalletProtocol } from '../shared/bsv.js'
 
 /** Security level 1: the wallet asks once per app (level 0 would never ask). */
 export const TOKEN_PROTOCOL: WalletProtocol = [1, 'bsv21 token']

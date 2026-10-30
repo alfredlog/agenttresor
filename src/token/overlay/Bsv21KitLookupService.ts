@@ -1,5 +1,5 @@
 import type { LookupFormula, LookupService, OutputAdmittedByTopic, OutputSpent } from '@bsv/overlay'
-import { Utils, type LookupQuestion } from '@bsv/sdk'
+import { Utils, type LookupQuestion } from '../../shared/bsv.js'
 import type { Knex } from 'knex'
 import { decodeBsv21, tokenIdFromOutpoint } from '../inscription'
 import { GAP_LIMIT, receivePkh } from '../addresses'

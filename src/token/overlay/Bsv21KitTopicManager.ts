@@ -1,5 +1,5 @@
 import type { TopicManager } from '@bsv/overlay'
-import { Transaction, type AdmittanceInstructions } from '@bsv/sdk'
+import { Transaction, type AdmittanceInstructions } from '../../shared/bsv.js'
 import { identifyAdmissible, type RuleOptions } from '../rules'
 
 export const TOPIC = 'tm_tokenkit'

@@ -15,7 +15,7 @@ import {
   type Transaction,
   type WalletInterface,
   type WalletProtocol
-} from '@bsv/sdk'
+} from '../shared/bsv.js'
 import { keyIdFor, TOKEN_PROTOCOL } from './addresses'
 
 /** <73-byte checksig sig push> + <33-byte pubkey push>. */

@@ -6,7 +6,7 @@
  * it does not fetch missing parents itself, so a failed submit must be retried
  * before any child transaction is submitted.
  */
-import { Beef, MerklePath, Transaction, Utils } from '@bsv/sdk'
+import { Beef, MerklePath, Transaction, Utils } from '../shared/bsv.js'
 import type { KitQuery, OutputContext } from './overlay/Bsv21KitLookupService'
 import { decodeBsv21 } from './inscription'
 

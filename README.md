@@ -158,3 +158,5 @@ claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "
 - `test/helpers/` — offline mock chain, test wallets and a proxy harness
 
 See `docs/BSV_STACK_COMPLETE_GUIDE.md` and `AGENTS.md` before writing BSV code.
+
+The BSV-21 token module is based on the official bsv21-token-kit starter kit from the BSV Developer Pack.

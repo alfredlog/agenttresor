@@ -5,8 +5,9 @@
  * its deploy. The wallet basket `bsv21` is the owner's local copy: `sync()`
  * pulls what the overlay says you own into the basket, and `send()` spends
  * from the basket, so the wallet tracks spends and backs the tokens up.
+ * Based on the official bsv21-token-kit starter kit from the BSV Developer Pack.
  */
-import { Beef, Transaction, type WalletInterface } from '@bsv/sdk'
+import { Beef, Transaction, type WalletInterface } from '../shared/bsv.js'
 import { buildBsv21Script, decodeBsv21, tokenIdFromOutpoint, type DecodedBsv21 } from './inscription'
 import { instructionsFor, receivePkh, TOKEN_BASKET, type CustomInstructions } from './addresses'
 import type { OverlayClient, OverlayOutput } from './overlayApi'
@@ -187,8 +188,15 @@ export class TokenKit {
       options: { randomizeOutputs: false, acceptDelayedBroadcast: false }
     }, this.originator)
     if (res.txid === undefined || res.tx === undefined) throw new Error('deploy was not completed by the wallet')
+        const deployedTx = Transaction.fromAtomicBEEF(res.tx)
+    const expectedScript = lockingScript.toHex()
+    const matchingVouts = deployedTx.outputs.flatMap((output, vout) =>
+      output.lockingScript.toHex() === expectedScript ? [vout] : []
+    )
+    if (matchingVouts.length !== 1) throw new Error('could not uniquely locate BSV-21 deployment output')
+
     await this.overlay.submit(res.tx)
-    return { txid: res.txid, tokenId: tokenIdFromOutpoint(res.txid, 0) }
+    return { txid: res.txid, tokenId: tokenIdFromOutpoint(res.txid, matchingVouts[0]) }
   }
 
   /**

@@ -14,7 +14,7 @@
  *  2. every JSON value is a string (`"dec":"2"`, not `"dec":2`);
  *  3. a transfer/burn `id` is `<txid>_<vout>` (underscore, not dot).
  */
-import { LockingScript, OP, P2PKH, Script, Utils } from '@bsv/sdk'
+import { LockingScript, OP, P2PKH, Script, Utils } from '../shared/bsv.js'
 
 export interface DecodedInscription {
   contentType: string
