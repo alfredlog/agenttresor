@@ -159,6 +159,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     if (key === undefined || !isAgentKey(key)) { unauthorized(); return }
     store.findAgentByKeyHash(hashAgentKey(key)).then(agent => {
       if (agent === undefined) { unauthorized(); return }
+      // Disabling revokes the key already; this also holds if a key ever outlived its agent.
+      if (agent.status !== 'active') { res.status(401).json({ error: 'agent disabled' }); return }
       res.locals.agent = agent
       next()
     }, next)
@@ -219,7 +221,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
       const s = store.with(trx)
       // Every active code is compared in constant time: a wrong, expired or used code costs the same as a right one.
       const match = findConnectCode(await s.activeConnectCodes(t), hashConnectCode(code))
-      if (match === undefined || !await s.useConnectCode(match.codeHash, t)) return undefined
+      if (match === undefined || (await s.getAgent(match.agentId))?.status !== 'active') return undefined
+      if (!await s.useConnectCode(match.codeHash, t)) return undefined
       // The API key is minted now; before this, no one has ever seen a working key for this agent.
       const apiKey = generateAgentKey()
       await s.replaceAgentKey(match.agentId, hashAgentKey(apiKey), agentKeyHint(apiKey))
@@ -248,7 +251,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     const rules = rulesInput === undefined ? DEFAULT_RULES : parseRules(rulesInput)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
     // The agent starts with a key no one ever sees; its real key is minted when it connects with the code.
-    const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: '', createdAt: now() }
+    const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: '', createdAt: now(), status: 'active' }
     const code = await store.transaction(async trx => {
       await store.with(trx).createAgent(agent, hashAgentKey(generateAgentKey()), rules)
       await audit.with(trx).append('admin', 'agent.created', { agentId: agent.id, name: agent.name, rules })
@@ -257,18 +260,52 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     res.status(201).json({ id: agent.id, name: agent.name, rules, connectCode: code.connectCode, connectUrl: code.connectUrl, expiresAt: code.expiresAt })
   }))
 
+  /** The agent, unless unknown or deleted (a deleted agent is only kept for its history). */
+  const liveAgent = async (id: string): Promise<Agent> => {
+    const agent = await store.getAgent(id)
+    if (agent === undefined || agent.status === 'deleted') throw new ProxyError(404, 'agent not found')
+    return agent
+  }
+
   // A new one-time code, e.g. for an agent on a new machine or one whose code expired.
   admin.post('/agents/:id/connect-code', wrap(async (req, res) => {
-    const agent = await store.getAgent(String(req.params.id))
-    if (agent === undefined) { res.status(404).json({ error: 'agent not found' }); return }
+    const agent = await liveAgent(String(req.params.id))
+    if (agent.status === 'disabled') { res.status(409).json({ error: 'agent is disabled; enable it to issue a new code' }); return }
     const code = await store.transaction(async trx => await issueConnectCode(trx, agent.id, req))
     res.status(201).json({ id: agent.id, ...code })
   }))
 
   // Never the API key or its hash: only the masked hint. agentPub is the agent's public signing key
   // (the dashboard shows its fingerprint).
-  admin.get('/agents', wrap(async (_req, res) => {
-    const agents = await store.listAgents()
+  // Disable: the key and codes are revoked, open requests denied, new requests refused. Reversible with enable.
+  admin.post('/agents/:id/disable', wrap(async (req, res) => {
+    const r = await control.retireAgent(String(req.params.id), 'disabled')
+    res.json({ id: r.agent.id, status: r.agent.status, deniedRequests: r.deniedRequests })
+  }))
+
+  // Enable: the agent connects again with a new one-time code (its old key stays revoked).
+  admin.post('/agents/:id/enable', wrap(async (req, res) => {
+    const agent = await liveAgent(String(req.params.id))
+    if (agent.status !== 'disabled') { res.status(409).json({ error: `agent is ${agent.status}, not disabled` }); return }
+    const code = await store.transaction(async trx => {
+      await store.with(trx).setAgentStatus(agent.id, 'active', now())
+      await audit.with(trx).append('admin', 'agent.enabled', { agentId: agent.id, name: agent.name })
+      return await issueConnectCode(trx, agent.id, req)
+    })
+    res.status(201).json({ id: agent.id, status: 'active', connectCode: code.connectCode, connectUrl: code.connectUrl, expiresAt: code.expiresAt })
+  }))
+
+  // Delete: hidden from the list and never usable again, but its requests, ledger and audit entries are kept.
+  // Refused (409) while company money is locked for it: an open vault or unspent request vaults.
+  admin.delete('/agents/:id', wrap(async (req, res) => {
+    const r = await control.retireAgent(String(req.params.id), 'deleted')
+    res.json({ id: r.agent.id, status: r.agent.status, deniedRequests: r.deniedRequests })
+  }))
+
+  // ?deleted=1 also lists deleted agents.
+  admin.get('/agents', wrap(async (req, res) => {
+    const includeDeleted = req.query.deleted === '1' || req.query.deleted === 'true'
+    const agents = await store.listAgents({ includeDeleted })
     const vaults = new Map((await vault.listVaults()).map(v => [v.agentId, v]))
     res.json({
       agents: await Promise.all(agents.map(async a => {
@@ -276,6 +313,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         return {
           id: a.id,
           name: a.name,
+          status: a.status,
           // No hint: the agent has not connected (or its key was revoked for a new code).
           key: a.keyHint === '' ? null : maskAgentKey(a.keyHint),
           connected: a.keyHint !== '',
@@ -290,8 +328,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   }))
 
   admin.put('/agents/:id/rules', wrap(async (req, res) => {
-    const agent = await store.getAgent(String(req.params.id))
-    if (agent === undefined) { res.status(404).json({ error: 'agent not found' }); return }
+    const agent = await liveAgent(String(req.params.id))
     const rules = parseRules(req.body)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
     await store.transaction(async trx => {
@@ -345,10 +382,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   }))
 
   // ── Vaults (the company funds and reclaims them from its own wallet) ─────
-  const knownAgent = async (id: string): Promise<string> => {
-    if (await store.getAgent(id) === undefined) throw new ProxyError(404, 'agent not found')
-    return id
-  }
+  const knownAgent = async (id: string): Promise<string> => (await liveAgent(id)).id
 
   admin.get('/vaults', wrap(async (_req, res) => {
     const vaults = await vault.listVaults()

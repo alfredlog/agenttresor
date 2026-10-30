@@ -53,6 +53,12 @@
     #audit-msg.failed { color: var(--bad); }
     .unanchored { color: var(--warn); font-weight: 600; }
     #audit-alert { border: 1px solid var(--bad); color: var(--bad); background: var(--card); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-weight: 600; }
+    .agent-disabled { color: var(--warn); font-weight: 600; }
+    .agent-deleted { color: var(--muted); font-weight: 600; }
+    tr.deleted td { opacity: .6; }
+    .toggle { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; margin-left: 12px; }
+    .toggle input { width: auto; }
+    td.agent-actions button { margin: 0 4px 4px 0; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -67,7 +73,7 @@
     <span id="error"></span>
   </div>
 
-  <h2>Agents</h2>
+  <h2>Agents <label class="toggle"><input id="show-deleted" type="checkbox"> show deleted</label></h2>
   <div class="table"><table>
     <thead><tr><th>Agent</th><th>Connection</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
     <tbody id="agents"><tr><td colspan="6" class="muted">Enter the admin token.</td></tr></tbody>
@@ -165,6 +171,7 @@
   const time = v => v ? new Date(v).toLocaleString() : ''
   const fpOf = pub => { if (!pub) return ''; try { return fingerprint(pub) } catch { return '?' } }
   const VAULT_STATUS = { no_key: 'agent key not registered', awaiting_funding: 'awaiting funding', open: 'open', closed: 'closed' }
+  const AGENT_STATUS = { disabled: '<span class="agent-disabled">disabled</span>', deleted: '<span class="agent-deleted">deleted</span>' }
 
   async function api (path, init = {}) {
     const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${store.get()}`, ...(init.headers || {}) } })
@@ -232,24 +239,36 @@
           <td class="${matches.get(a.txid) ? 'chain-ok' : 'chain-bad'}">${matches.get(a.txid) ? 'yes' : 'NO'}</td></tr>`).join('')
   }
 
+  /** The buttons an agent's row offers, by its status. A deleted agent has none: it is only kept for its history. */
+  function agentActions (a) {
+    const id = esc(a.id)
+    if (a.status === 'deleted') return ''
+    const del = `<button class="deny" data-agent-action="delete" data-id="${id}">Delete</button>`
+    if (a.status === 'disabled') {
+      return `<button data-edit="${id}">Edit rules</button><button class="approve" data-agent-action="enable" data-id="${id}">Enable</button>${del}`
+    }
+    return `<button data-edit="${id}">Edit rules</button><button data-code="${id}">New code</button>` +
+      `<button class="deny" data-agent-action="disable" data-id="${id}">Disable</button>${del}`
+  }
+
   function renderAgents () {
     $('agents').innerHTML = agents.length === 0
       ? '<tr><td colspan="6" class="muted">No agents yet: create one below.</td></tr>'
-      : agents.map(a => `<tr>
-          <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span></td>
-          <td>${a.connected ? `<span class="mono">${esc(a.key)}</span>` : '<span class="muted">not connected</span>'}</td>
+      : agents.map(a => `<tr class="${a.status === 'deleted' ? 'deleted' : ''}">
+          <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span>${AGENT_STATUS[a.status] ? `<br>${AGENT_STATUS[a.status]}` : ''}</td>
+          <td>${a.status !== 'active' ? '<span class="muted">key revoked</span>' : a.connected ? `<span class="mono">${esc(a.key)}</span>` : '<span class="muted">not connected</span>'}</td>
           <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
           <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
             max ${esc(a.rules.maxPerPaymentSats)} · daily ${esc(a.rules.dailyBudgetSats)} · approval above ${esc(a.rules.approvalThresholdSats)} sats</td>
           <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}</td>
-          <td><button data-edit="${esc(a.id)}">Edit rules</button> <button data-code="${esc(a.id)}">New code</button></td></tr>`).join('')
+          <td class="agent-actions">${agentActions(a)}</td></tr>`).join('')
   }
 
   async function refresh () {
     if (!store.get()) return
     try {
       const [{ agents: list }, { requests }, ledger, audit, check, head] = await Promise.all([
-        api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'),
+        api($('show-deleted').checked ? '/admin/agents?deleted=1' : '/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'),
         api('/admin/audit/verify'), api('/admin/audit/head')
       ])
       agents = list
@@ -349,6 +368,39 @@
   let editing = null
 
   $('agents').addEventListener('click', async ev => {
+    // Disable / Enable / Delete. Nothing is erased: requests, ledger and audit entries stay.
+    const actBtn = ev.target.closest('button[data-agent-action]')
+    if (actBtn) {
+      const { agentAction: action, id } = actBtn.dataset
+      const agent = agents.find(a => a.id === id)
+      if (!agent) return
+      const label = `${agent.name} (${agent.id})`
+      const question = {
+        disable: `Disable ${label}?\n\nIts API key and connection codes are revoked, its pending and approved requests are denied, ` +
+          'and it cannot pay until you enable it again (with a new connection code).\n\nIts history is kept: requests, ledger and audit log.',
+        delete: `Delete ${label}?\n\nIt disappears from the list and can never be used again. Its vault must be reclaimed first.\n\n` +
+          'Its history is kept: requests, ledger entries and audit log entries are never erased.'
+      }[action]
+      if (question !== undefined && !confirm(question)) return
+      actBtn.disabled = true
+      let failure = ''
+      try {
+        const path = `/admin/agents/${encodeURIComponent(agent.id)}`
+        if (action === 'delete') await api(path, { method: 'DELETE' })
+        else {
+          const r = await api(`${path}/${action}`, { method: 'POST' })
+          if (action === 'enable') showCode(label, r)
+        }
+      } catch (err) {
+        failure = `${action[0].toUpperCase()}${action.slice(1)} ${agent.name}: ${err.message}`
+      } finally {
+        actBtn.disabled = false
+      }
+      await refresh()
+      // After the refresh, which clears the error line when it succeeds (e.g. "reclaim its vault first").
+      if (failure !== '') $('error').textContent = failure
+      return
+    }
     const codeBtn = ev.target.closest('button[data-code]')
     if (codeBtn) {
       const agent = agents.find(a => a.id === codeBtn.dataset.code)
@@ -456,6 +508,7 @@
     }
   })
 
+  $('show-deleted').addEventListener('change', () => { refresh() })
   $('save').addEventListener('click', () => { store.set($('token').value.trim()); $('token').value = ''; refresh() })
   $('token').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('save').click() })
   refresh()

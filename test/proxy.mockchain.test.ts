@@ -235,6 +235,7 @@ describe('authentication', () => {
     expect(listed).toEqual({
       id: created.body.id,
       name: 'masked-bot',
+      status: 'active',
       key: `${apiKey.slice(0, 8)}…`,
       connected: true,
       createdAt: expect.any(String),

@@ -13,11 +13,15 @@ export const REQUEST_STATUSES: RequestStatus[] = ['pending', 'approved', 'denied
 /** Statuses whose satoshis have left the wallet: both count against the budget. */
 export const SPENT_STATUSES: RequestStatus[] = ['paid', 'paid_not_delivered']
 
+/** disabled: no key, no codes, every request refused until enabled. deleted: hidden, never usable again; its history stays. */
+export type AgentStatus = 'active' | 'disabled' | 'deleted'
+
 export interface Agent {
   id: string
   name: string
   keyHint: string
   createdAt: number
+  status: AgentStatus
 }
 
 export type { MerchantAnswer } from '../shared/merchant.js'
@@ -194,6 +198,21 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
     async down (k) {
       await k.schema.dropTable('connect_codes')
     }
+  },
+  '006_agent_status': {
+    async up (k) {
+      // Agents are disabled or deleted, never removed: their requests, ledger and audit entries reference them.
+      await k.schema.alterTable('agents', t => {
+        t.string('status').notNullable().defaultTo('active')
+        t.bigInteger('status_changed_at')
+      })
+    },
+    async down (k) {
+      await k.schema.alterTable('agents', t => {
+        t.dropColumn('status_changed_at')
+        t.dropColumn('status')
+      })
+    }
   }
 }
 
@@ -261,7 +280,7 @@ function toRow (r: Partial<PaymentRequestRecord>): Record<string, unknown> {
   return row
 }
 
-const toAgent = (row: any): Agent => ({ id: row.id, name: row.name, keyHint: row.key_hint, createdAt: row.created_at })
+const toAgent = (row: any): Agent => ({ id: row.id, name: row.name, keyHint: row.key_hint, createdAt: row.created_at, status: row.status ?? 'active' })
 
 export class ProxyStore {
   constructor (private readonly db: Knex) {}
@@ -278,7 +297,7 @@ export class ProxyStore {
 
   async createAgent (agent: Agent, keyHash: string, rules: Rules = DEFAULT_RULES): Promise<void> {
     await this.db.transaction(async trx => {
-      await trx('agents').insert({ id: agent.id, name: agent.name, key_hash: keyHash, key_hint: agent.keyHint, created_at: agent.createdAt })
+      await trx('agents').insert({ id: agent.id, name: agent.name, key_hash: keyHash, key_hint: agent.keyHint, created_at: agent.createdAt, status: agent.status })
       await trx('rules').insert({ agent_id: agent.id, ...rulesRow(rules) })
     })
   }
@@ -299,6 +318,11 @@ export class ProxyStore {
     await this.db('connect_codes').insert({ code_hash: codeHash, agent_id: agentId, expires_at: expiresAt, created_at: now })
   }
 
+  /** Drops the agent's unused codes (a disabled or deleted agent cannot connect). */
+  async dropConnectCodes (agentId: string): Promise<number> {
+    return await this.db('connect_codes').where({ agent_id: agentId }).whereNull('used_at').delete()
+  }
+
   /** Codes that can still be used. */
   async activeConnectCodes (now: number): Promise<Array<{ codeHash: string, agentId: string }>> {
     const rows = await this.db('connect_codes').whereNull('used_at').where('expires_at', '>', now).select('code_hash', 'agent_id')
@@ -315,8 +339,27 @@ export class ProxyStore {
     return row === undefined ? undefined : toAgent(row)
   }
 
-  async listAgents (): Promise<Agent[]> {
-    return (await this.db('agents').orderBy('created_at', 'asc')).map(toAgent)
+  /** Agents, oldest first; deleted ones only on request. */
+  async listAgents (opts: { includeDeleted?: boolean } = {}): Promise<Agent[]> {
+    const q = this.db('agents').orderBy('created_at', 'asc')
+    if (opts.includeDeleted !== true) q.whereNot({ status: 'deleted' })
+    return (await q).map(toAgent)
+  }
+
+  async setAgentStatus (agentId: string, status: AgentStatus, now: number): Promise<void> {
+    await this.db('agents').where({ id: agentId }).update({ status, status_changed_at: now })
+  }
+
+  /** Requests still waiting for a decision or for execution. */
+  async openRequests (agentId: string): Promise<PaymentRequestRecord[]> {
+    return (await this.db('requests').where({ agent_id: agentId }).whereIn('status', ['pending', 'approved']).orderBy('created_at', 'asc')).map(toRecord)
+  }
+
+  /** Company money still locked for this agent: an open vault, and request vaults not spent or reclaimed. */
+  async lockedFunds (agentId: string): Promise<{ vaultOpen: boolean, openRequestVaults: string[] }> {
+    const vault = await this.db('vaults').where({ agent_id: agentId, status: 'open' }).first()
+    const rvs = await this.db('request_vaults').where({ agent_id: agentId, status: 'open' }).select('request_id')
+    return { vaultOpen: vault !== undefined, openRequestVaults: rvs.map(r => r.request_id as string) }
   }
 
   async getRules (agentId: string): Promise<Rules> {
