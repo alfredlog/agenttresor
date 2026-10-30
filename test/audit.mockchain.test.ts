@@ -27,7 +27,7 @@ const entries = async (): Promise<AuditEntry[]> => await new AuditLog(h.db).all(
 const ofAgent = async (agentId: string): Promise<Array<[string, string]>> =>
   (await entries()).filter(e => e.data.agentId === agentId).map(e => [e.actor, e.type])
 const head = async (): Promise<{ seq: number, hash: string }> => (await h.admin('/admin/audit/head')).body
-const verify = async (): Promise<any> => (await h.admin('/admin/audit/verify')).body
+const verify = async (): Promise<any> => (await h.admin('/admin/audit/verify?full=1')).body
 const newAgent = async (name: string, vaultSats = 0): Promise<TestAgent> => {
   const a = await h.createAgent(name, rules(), vaultSats)
   agents.push(a)

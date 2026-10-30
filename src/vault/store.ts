@@ -122,6 +122,16 @@ function toRow (patch: Record<string, unknown>): Record<string, unknown> {
 export class VaultStore {
   constructor (private readonly db: Knex) {}
 
+  /** The same store, working inside `trx` (pair it with AuditLog.with(trx) to commit a change and its audit entry together). */
+  with (trx: Knex.Transaction): VaultStore {
+    return new VaultStore(trx)
+  }
+
+  /** Runs `fn` in one database transaction. */
+  async transaction<T> (fn: (trx: Knex.Transaction) => Promise<T>): Promise<T> {
+    return await this.db.transaction(fn)
+  }
+
   async getVault (agentId: string): Promise<Vault | undefined> {
     const row = await this.db('vaults').where({ agent_id: agentId }).first()
     return row === undefined ? undefined : toVault(row)

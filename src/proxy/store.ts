@@ -250,6 +250,16 @@ const toAgent = (row: any): Agent => ({ id: row.id, name: row.name, keyHint: row
 export class ProxyStore {
   constructor (private readonly db: Knex) {}
 
+  /** The same store, working inside `trx` (pair it with AuditLog.with(trx) to commit a change and its audit entry together). */
+  with (trx: Knex.Transaction): ProxyStore {
+    return new ProxyStore(trx)
+  }
+
+  /** Runs `fn` in one database transaction: everything it writes commits or rolls back together. */
+  async transaction<T> (fn: (trx: Knex.Transaction) => Promise<T>): Promise<T> {
+    return await this.db.transaction(fn)
+  }
+
   async createAgent (agent: Agent, keyHash: string, rules: Rules = DEFAULT_RULES): Promise<void> {
     await this.db.transaction(async trx => {
       await trx('agents').insert({ id: agent.id, name: agent.name, key_hash: keyHash, key_hint: agent.keyHint, created_at: agent.createdAt })

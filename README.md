@@ -80,9 +80,28 @@ the company anchors the head on BSV from its own wallet (dashboard: *Anchor now 
 `src/company/audit-client.ts`): one 0-sat output `OP_FALSE OP_RETURN "agenttresor-audit" <hash> <seq>`. The proxy pays
 nothing; it checks the transaction by SPV and that the hash is the one at that seq, then records the anchor.
 
-- `GET /admin/audit?after=&limit=` — entries and anchors (with WhatsOnChain links); `GET /admin/audit/head`
-- `GET /admin/audit/verify` — the chain, and for each anchor whether the log still matches it
-- `npm run audit:verify [-- path/to/proxy.sqlite]` — the same check from the command line (exit code 1 if tampered)
+- `GET /admin/audit?after=&limit=` — entries and anchors (with WhatsOnChain links)
+- `GET /admin/audit/head` — `{seq, hash, unanchoredEntries, latestAnchorSeq, chainShorterThanAnchor}`
+- `GET /admin/audit/verify` — incremental: re-hashes only the entries after the last verified one (after checking that
+  one is unchanged; any mismatch falls back to a full check). `?full=1` re-checks the whole chain. Both also check
+  every anchor and whether the log is shorter than the latest anchor.
+- `npm run audit:verify [-- path/to/proxy.sqlite]` — a full check from the command line (exit code 1 if tampered)
+
+Every state change and its audit entry are written in one database transaction: if the entry cannot be written,
+the change is rolled back too.
+
+### Known limits
+
+- **A payment is broadcast before its database transaction.** The vault state, the `vault.payment` entry and the
+  request's "paid" record commit together, but after the broadcast, which cannot be rolled back. If that transaction
+  fails (disk full, crash), the payment is on chain without a record; it then has to be reconciled from the txid.
+- **The dashboard's verify is incremental.** It catches new entries and a changed last-verified entry, not an edit
+  to an older entry: use *Verify full chain* or `npm run audit:verify` for that. The verified mark lives in memory, so
+  the first check after a restart is a full one.
+- **Only anchored entries are protected against deletion.** Deleting entries up to an anchor is reported (the log is
+  shorter than the anchor), but entries after the latest anchor can be removed without trace. The dashboard shows how
+  many are not anchored yet: anchor often.
+- **One proxy process per database.** Appends, the per-agent locks and the verified mark are per process.
 
 ## The AI agent (MCP server)
 
