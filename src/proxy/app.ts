@@ -2,7 +2,7 @@
  * Spend-control proxy HTTP API.
  *   Agents (Authorization: Bearer agt_…): /v1/pay, /v1/requests/:id, /v1/requests/:id/execute,
  *     /v1/requests/:id/sign, /v1/budget, /v1/vault/agent-key
- *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults)
+ *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults, audit log)
  *   Dashboard: / (public/index.html); vault funding page: /vault.html
  * Keys and tokens are never logged.
  */
@@ -17,6 +17,8 @@ import type { Broadcaster } from '../vault/broadcaster.js'
 import { PolicyKeys } from '../vault/keys.js'
 import { VaultService } from '../vault/service.js'
 import { VaultStore } from '../vault/store.js'
+import { AuditLog } from '../audit/log.js'
+import { recordAnchor } from '../audit/anchors.js'
 import type { Notifier } from './notifier.js'
 import { DEFAULT_RULES, parseRules } from './rules.js'
 import { ProxyError, SpendControl, type Outcome } from './service.js'
@@ -99,14 +101,16 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const network = opts.network ?? getNetwork()
   const now = opts.now ?? Date.now
   const store = new ProxyStore(opts.db)
+  const audit = new AuditLog(opts.db, now)
   const vault = new VaultService({
     store: new VaultStore(opts.db),
     policy: new PolicyKeys(opts.policyRootKey),
     chainTracker: opts.chainTracker,
     broadcaster: opts.broadcaster,
+    audit,
     now
   })
-  const control = new SpendControl({ store, vault, notifier: opts.notifier, now })
+  const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now })
 
   const app = express()
   app.disable('x-powered-by')
@@ -184,6 +188,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     const apiKey = generateAgentKey()
     const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: agentKeyHint(apiKey), createdAt: now() }
     await store.createAgent(agent, hashAgentKey(apiKey), rules)
+    // The key itself is never logged, only its masked hint.
+    await audit.append('admin', 'agent.created', { agentId: agent.id, name: agent.name, keyHint: maskAgentKey(agent.keyHint), rules })
     // The only time the key is ever returned.
     res.status(201).json({ id: agent.id, name: agent.name, apiKey, key: maskAgentKey(agent.keyHint), rules })
   }))
@@ -215,7 +221,9 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     if (agent === undefined) { res.status(404).json({ error: 'agent not found' }); return }
     const rules = parseRules(req.body)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
+    const before = await store.getRules(agent.id)
     await store.setRules(agent.id, rules)
+    await audit.append('admin', 'agent.rules_changed', { agentId: agent.id, before, after: rules })
     res.json({ id: agent.id, rules })
   }))
 
@@ -336,6 +344,37 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     const { txid } = (req.body ?? {}) as Record<string, unknown>
     const rv = await control.requestVaultReclaimed(String(req.params.requestId), txid)
     res.json({ requestId: rv.requestId, status: rv.status, explorerUrl: txLink(String(txid), network) })
+  }))
+
+  // ── Audit log (hash chain, anchored on BSV by the company's wallet) ─────
+  const anchorView = (a: { seq: number, hash: string, txid: string, at: number }): Record<string, unknown> =>
+    ({ seq: a.seq, hash: a.hash, txid: a.txid, at: iso(a.at), explorerUrl: txLink(a.txid, network) })
+
+  admin.get('/audit/head', wrap(async (_req, res) => {
+    res.json(await audit.head())
+  }))
+
+  // ?after=<seq>&limit=<n>: entries with seq > after, oldest first; without `after`, the last `limit` entries.
+  admin.get('/audit', wrap(async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 1000)
+    const head = await audit.head()
+    const after = req.query.after === undefined ? Math.max(0, head.seq - limit) : Number(req.query.after)
+    if (!Number.isSafeInteger(after) || after < 0) { res.status(400).json({ error: 'after must be a sequence number' }); return }
+    res.json({
+      head,
+      entries: (await audit.list(after, limit)).map(e => ({ ...e, at: iso(e.at) })),
+      anchors: (await audit.anchors()).map(anchorView)
+    })
+  }))
+
+  admin.get('/audit/verify', wrap(async (_req, res) => {
+    const v = await audit.verify()
+    res.json({ ...v, anchors: v.anchors.map(a => ({ ...anchorView(a), matches: a.matches })) })
+  }))
+
+  admin.post('/audit/anchors', wrap(async (req, res) => {
+    const anchor = await recordAnchor(audit, opts.chainTracker, (req.body ?? {}) as Record<string, unknown>, now())
+    res.status(201).json(anchorView(anchor))
   }))
 
   app.use('/admin', admin)

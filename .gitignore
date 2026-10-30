@@ -9,3 +9,4 @@ mcp-data/
 # Built by npm run build:web
 public/vault.js
 public/fingerprint.js
+public/audit.js

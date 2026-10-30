@@ -9,6 +9,8 @@
  */
 import { Beef, LockingScript, P2PKH, Random, Transaction, Utils, type ChainTracker } from '../shared/bsv.js'
 import type { PaymentHeaders } from '../shared/brc121.js'
+import { fingerprint } from '../shared/fingerprint.js'
+import type { AuditLog } from '../audit/log.js'
 import { ProxyError } from '../proxy/errors.js'
 import type { Broadcaster } from './broadcaster.js'
 import { buildRequestVaultPayment, buildVaultPayment, requestVaultFee, type VaultOutpoint } from './builder.js'
@@ -44,6 +46,8 @@ export interface VaultServiceOptions {
   policy: PolicyKeys
   chainTracker: ChainTracker
   broadcaster: Broadcaster
+  /** Every funding, payment and reclaim is recorded here. */
+  audit: AuditLog
   now: () => number
 }
 
@@ -77,6 +81,7 @@ export class VaultService {
   private readonly policy: PolicyKeys
   private readonly chainTracker: ChainTracker
   private readonly broadcaster: Broadcaster
+  private readonly audit: AuditLog
   private readonly now: () => number
 
   constructor (opts: VaultServiceOptions) {
@@ -84,6 +89,7 @@ export class VaultService {
     this.policy = opts.policy
     this.chainTracker = opts.chainTracker
     this.broadcaster = opts.broadcaster
+    this.audit = opts.audit
     this.now = opts.now
   }
 
@@ -98,6 +104,7 @@ export class VaultService {
     // The registered key is public; returning it lets an agent see whether its own key is the one in use.
     if (vault?.status === 'open') throw new ProxyError(409, 'the vault is funded with the current key; the company must reclaim it first', { code: 'VAULT_OPEN', agentPub: vault.agentPub })
     await this.store.setAgentKey(agentId, publicKey, this.now())
+    await this.audit.append(`agent:${agentId}`, 'agent.key_registered', { agentId, agentPub: publicKey, fingerprint: fingerprint(publicKey) })
     return (await this.store.getVault(agentId))!
   }
 
@@ -119,6 +126,7 @@ export class VaultService {
 
     const now = this.now()
     await this.store.insertTx({ ...emptyTx(agentId, now), kind: 'fund', status: 'done', txid: f.txid, priceSats: f.satoshis })
+    await this.audit.append('company', 'vault.funded', { agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, agentFingerprint: fingerprint(vault.agentPub) })
     return await this.store.updateVault(agentId, {
       companyPub: f.companyPub,
       lockingScript: f.lockingScript,
@@ -173,6 +181,7 @@ export class VaultService {
     }
     await this.store.insertRequestVault(rv)
     await this.store.insertTx({ ...emptyTx(agentId, now), requestId, kind: 'fund', status: 'done', txid: f.txid, priceSats: f.satoshis })
+    await this.audit.append('company', 'request_vault.funded', { requestId, agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, priceSats, agentFingerprint: fingerprint(vault.agentPub) })
     return rv
   }
 
@@ -206,6 +215,7 @@ export class VaultService {
       if (attempt.requestId === requestId) await this.store.updateTx(attempt.id, { status: 'failed', reason: 'request vault reclaimed', updatedAt: now })
     }
     await this.store.insertTx({ ...emptyTx(rv.agentId, now), requestId, kind: 'reclaim', status: 'done', txid, inputOutpoint: `${rv.txid}.${rv.vout}`, priceSats: rv.satoshis })
+    await this.audit.append('company', 'request_vault.reclaimed', { requestId, agentId: rv.agentId, txid, satoshis: rv.satoshis })
     return await this.store.updateRequestVault(requestId, { status: 'reclaimed', closingTxid: txid, updatedAt: now })
   }
 
@@ -231,6 +241,7 @@ export class VaultService {
       await this.store.updateTx(attempt.id, { status: 'failed', reason: 'vault reclaimed', updatedAt: now })
     }
     await this.store.insertTx({ ...emptyTx(agentId, now), kind: 'reclaim', status: 'done', txid, inputOutpoint: `${vault.txid!}.${vault.vout!}`, priceSats: vault.satoshis })
+    await this.audit.append('company', 'vault.reclaimed', { agentId, txid, satoshis: vault.satoshis })
     return await this.store.updateVault(agentId, { status: 'closed', updatedAt: now })
   }
 
@@ -385,6 +396,10 @@ export class VaultService {
     }
 
     await this.store.updateTx(attempt.id, { status: 'broadcast', txid, updatedAt: now })
+    // Signed by the agent and the policy: recorded as the agent's payment, from whichever vault it spent.
+    await this.audit.append(`agent:${agentId}`, 'vault.payment', {
+      agentId, requestId, from: source.kind === 'request' ? 'request_vault' : 'agent_vault', txid, priceSats: attempt.priceSats, feeSats: attempt.feeSats
+    })
     if (source.kind === 'request') {
       await this.store.updateRequestVault(requestId, { status: 'spent', closingTxid: txid, updatedAt: now })
     } else {

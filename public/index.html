@@ -45,6 +45,10 @@
     #key-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
     .warn { color: var(--warn); font-weight: 600; }
     .hint { font-size: 13px; }
+    .chain-ok { color: var(--ok); font-weight: 600; }
+    .chain-bad { color: var(--bad); font-weight: 600; }
+    td.details { font-size: 12px; max-width: 420px; word-break: break-word; }
+    #audit-msg.failed { color: var(--bad); }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -117,6 +121,24 @@
     <thead><tr><th>Paid</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th>Status</th><th>Transaction</th></tr></thead>
     <tbody id="ledger"></tbody>
   </table></div>
+
+  <h2>Audit log</h2>
+  <div class="muted hint">Every decision and payment, hash-chained: changing any past entry breaks the chain. Anchoring writes the
+    current head hash on BSV from your wallet, so even a rewritten chain is caught.</div>
+  <div class="actions">
+    <span id="audit-status" class="muted">Enter the admin token.</span>
+    <button id="anchor" class="primary" disabled>Anchor now with BSV Desktop</button>
+    <span id="audit-msg" class="muted"></span>
+  </div>
+  <div class="table" style="margin-top:12px"><table>
+    <thead><tr><th class="num">#</th><th>Time</th><th>Actor</th><th>Event</th><th>Details</th></tr></thead>
+    <tbody id="audit"></tbody>
+  </table></div>
+  <h2 style="font-size:13px">Anchors on BSV</h2>
+  <div class="table"><table>
+    <thead><tr><th class="num">#</th><th>Head hash</th><th>Transaction</th><th>Still matches the log</th></tr></thead>
+    <tbody id="anchors"><tr><td colspan="4" class="muted">None yet.</td></tr></tbody>
+  </table></div>
 </main>
 <script type="module">
   // Built by `npm run build:web` from src/shared/fingerprint.ts (the agent and vault.html use the same function).
@@ -154,6 +176,37 @@
   }
 
   let agents = []
+  let anchoring = false
+
+  /** key=value pairs of an audit entry's data, for the table (escaped by the caller). */
+  const details = data => Object.entries(data ?? {})
+    .map(([k, v]) => `${k}=${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`).join(' · ').slice(0, 220)
+
+  function renderAudit ({ entries, anchors }, check) {
+    const lastAnchor = anchors.at(-1)
+    $('audit-status').className = check.ok ? 'chain-ok' : 'chain-bad'
+    $('audit-status').textContent = check.ok
+      ? `Chain valid · ${check.entries} entries${lastAnchor ? ` · last anchored at #${lastAnchor.seq}` : ' · not anchored yet'}`
+      : `Chain BROKEN at #${check.brokenAt}: ${check.reason}`
+    if (check.ok && check.anchors.some(a => !a.matches)) {
+      $('audit-status').className = 'chain-bad'
+      $('audit-status').textContent = `Chain rewritten: anchor #${check.anchors.find(a => !a.matches).seq} no longer matches the log`
+    }
+    // Stays disabled while an anchor is in progress, whatever the periodic refresh finds.
+    $('anchor').disabled = anchoring || check.entries === 0
+    $('audit').innerHTML = entries.length === 0
+      ? '<tr><td colspan="5" class="muted">No entries yet.</td></tr>'
+      : entries.slice().reverse().map(e => `<tr>
+          <td class="num mono">${esc(e.seq)}</td><td>${esc(time(e.at))}</td><td class="mono">${esc(e.actor)}</td>
+          <td class="mono">${esc(e.type)}</td><td class="details mono">${esc(details(e.data))}</td></tr>`).join('')
+    const matches = new Map(check.anchors.map(a => [a.txid, a.matches]))
+    $('anchors').innerHTML = anchors.length === 0
+      ? '<tr><td colspan="4" class="muted">None yet.</td></tr>'
+      : anchors.slice().reverse().map(a => `<tr>
+          <td class="num mono">${esc(a.seq)}</td><td class="mono">${esc(a.hash.slice(0, 16))}…</td>
+          <td class="mono"><a href="${esc(a.explorerUrl)}" target="_blank" rel="noopener">${esc(a.txid.slice(0, 16))}…</a></td>
+          <td class="${matches.get(a.txid) ? 'chain-ok' : 'chain-bad'}">${matches.get(a.txid) ? 'yes' : 'NO'}</td></tr>`).join('')
+  }
 
   function renderAgents () {
     $('agents').innerHTML = agents.length === 0
@@ -171,9 +224,12 @@
   async function refresh () {
     if (!store.get()) return
     try {
-      const [{ agents: list }, { requests }, ledger] = await Promise.all([api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger')])
+      const [{ agents: list }, { requests }, ledger, audit, check] = await Promise.all([
+        api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'), api('/admin/audit/verify')
+      ])
       agents = list
       renderAgents()
+      renderAudit(audit, check)
       $('error').textContent = ''
       $('pending').innerHTML = requests.length === 0
         ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
@@ -285,6 +341,28 @@
     }
     btn.disabled = true
     try { await api(`/admin/requests/${encodeURIComponent(id)}/${action}`, { method: 'POST', body }) } catch (err) { $('error').textContent = err.message }
+    await refresh()
+  })
+
+  // ── Anchor the audit log head from BSV Desktop (the bundle loads only when used) ──
+  $('anchor').addEventListener('click', async ev => {
+    const btn = ev.currentTarget // currentTarget is null once the handler awaits
+    anchoring = true
+    btn.disabled = true
+    // Messages stay in the Audit section: the periodic refresh clears the shared error line.
+    $('audit-msg').className = 'muted'
+    $('audit-msg').textContent = 'Approve the anchor transaction in BSV Desktop…'
+    try {
+      const { anchorNow } = await import('./audit.js')
+      const r = await anchorNow(location.origin, store.get())
+      $('audit-msg').textContent = `Anchored #${r.seq} in ${r.txid.slice(0, 16)}…`
+    } catch (err) {
+      $('audit-msg').className = 'failed'
+      $('audit-msg').textContent = `Not anchored: ${err.message}`
+    } finally {
+      anchoring = false
+      btn.disabled = false
+    }
     await refresh()
   })
 

@@ -5,7 +5,7 @@
  *  - above it: held until the company approves it by funding a request vault
  *    for exactly this payment from its own wallet, then paid from that vault;
  *  - against the rules: refused.
- * Every request is kept in the ledger.
+ * Every request is kept in the ledger, and every decision in the audit log.
  *
  * Requests of one agent are serialized (rules check + payment), so two
  * concurrent requests cannot both pass the daily budget. This lock is per
@@ -14,6 +14,7 @@
 import { randomBytes } from 'node:crypto'
 import type { FundingBody, FinalizedPayment, SignRequest, VaultService } from '../vault/service.js'
 import type { RequestVault } from '../vault/store.js'
+import type { AuditActor, AuditLog, AuditType } from '../audit/log.js'
 import { ProxyError } from './errors.js'
 import { callMerchant, preflight, type MerchantCall } from '../shared/merchant.js'
 import type { Notifier } from './notifier.js'
@@ -41,6 +42,7 @@ export type Outcome =
 export interface ServiceOptions {
   store: ProxyStore
   vault: VaultService
+  audit: AuditLog
   notifier: Notifier
   now: () => number
   /** A pending request expires after this long without a decision (default 7 days). */
@@ -58,6 +60,7 @@ export function newRequestId (): string {
 export class SpendControl {
   private readonly store: ProxyStore
   private readonly vault: VaultService
+  private readonly audit: AuditLog
   private readonly notifier: Notifier
   private readonly now: () => number
   private readonly ttl: { pendingMs: number, approvedMs: number }
@@ -66,6 +69,7 @@ export class SpendControl {
   constructor (opts: ServiceOptions) {
     this.store = opts.store
     this.vault = opts.vault
+    this.audit = opts.audit
     this.notifier = opts.notifier
     this.now = opts.now
     this.ttl = { pendingMs: opts.pendingTtlMs ?? 7 * 86_400_000, approvedMs: opts.approvedTtlMs ?? 86_400_000 }
@@ -98,11 +102,13 @@ export class SpendControl {
         decidedBy: null,
         paidAt: null
       }
-      const refuse = async (status: 'denied' | 'failed', reason: string, httpStatus: number, extra: Partial<PaymentRequestRecord> = {}): Promise<Outcome> => ({
-        kind: 'record',
-        record: await this.store.insertRequest({ ...base, ...extra, status, reason, decidedAt: now, decidedBy: 'rules' }),
-        httpStatus
-      })
+      const refuse = async (status: 'denied' | 'failed', reason: string, httpStatus: number, extra: Partial<PaymentRequestRecord> = {}): Promise<Outcome> => {
+        const record = await this.store.insertRequest({ ...base, ...extra, status, reason, decidedAt: now, decidedBy: 'rules' })
+        await this.logCreated(record)
+        if (status === 'denied') await this.log('rules', 'request.decided', { requestId: record.id, agentId: agent.id, decision: 'denied', reason })
+        else await this.log(`agent:${agent.id}`, 'request.failed', { requestId: record.id, agentId: agent.id, reason })
+        return { kind: 'record', record, httpStatus }
+      }
 
       // Unknown hosts are refused before the proxy contacts them at all.
       if (!hostAllowed(rules, host)) return await refuse('denied', `host ${host} is not allowed`, 403)
@@ -124,6 +130,7 @@ export class SpendControl {
       // Above the threshold the company funds the payment itself when it approves it.
       if (decision.decision === 'needs_approval') {
         const record = await this.store.insertRequest({ ...base, ...priced, status: 'pending' })
+        await this.logCreated(record)
         await this.notify(n => n.approvalNeeded(record))
         return { kind: 'record', record, httpStatus: 202 }
       }
@@ -133,6 +140,8 @@ export class SpendControl {
       if (short !== undefined) return await refuse('denied', short, 403, priced)
 
       const record = await this.store.insertRequest({ ...base, ...priced, status: 'approved', decidedAt: now, decidedBy: 'rules' })
+      await this.logCreated(record)
+      await this.log('rules', 'request.decided', { requestId: record.id, agentId: agent.id, decision: 'approved', priceSats: pf.sats })
       return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
     })
   }
@@ -161,9 +170,11 @@ export class SpendControl {
       if (pf.kind === 'free') return { kind: 'free', answer: pf.answer }
       if (pf.kind === 'invalid') throw new ProxyError(502, pf.reason)
 
-      const fail = async (reason: string): Promise<Outcome> => ({
-        kind: 'record', record: await this.store.updateRequest(id, { status: 'failed', reason }), httpStatus: 409
-      })
+      const fail = async (reason: string): Promise<Outcome> => {
+        const failed = await this.store.updateRequest(id, { status: 'failed', reason })
+        await this.log(`agent:${agent.id}`, 'request.failed', { requestId: id, agentId: agent.id, reason })
+        return { kind: 'record', record: failed, httpStatus: 409 }
+      }
       const rv = await this.vault.requestVault(id)
       if (rv !== undefined) return await this.executeFromRequestVault(agent, record, rv, pf, fail)
       if (pf.sats > (record.priceSats ?? 0)) {
@@ -176,9 +187,7 @@ export class SpendControl {
       const now = this.now()
       const rules = await this.store.getRules(agent.id)
       const decision = evaluate(rules, await this.store.spentSince(agent.id, dayStart(now)), new URL(record.url).host, pf.sats)
-      if (decision.decision === 'deny') {
-        return { kind: 'record', record: await this.store.updateRequest(id, { status: 'denied', reason: decision.reason, decidedBy: 'rules' }), httpStatus: 403 }
-      }
+      if (decision.decision === 'deny') return await this.denyAtExecute(id, agent.id, decision.reason)
       const short = await this.vault.capacityProblem(agent.id, pf.sats)
       if (short !== undefined) throw new ProxyError(403, short)
       return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
@@ -204,10 +213,15 @@ export class SpendControl {
     const now = this.now()
     const rules = await this.store.getRules(agent.id)
     const decision = evaluate(rules, await this.store.spentSince(agent.id, dayStart(now)), new URL(record.url).host, pf.sats)
-    if (decision.decision === 'deny') {
-      return { kind: 'record', record: await this.store.updateRequest(record.id, { status: 'denied', reason: decision.reason, decidedBy: 'rules' }), httpStatus: 403 }
-    }
+    if (decision.decision === 'deny') return await this.denyAtExecute(record.id, agent.id, decision.reason)
     return { kind: 'sign', record, sign: await this.vault.prepareFromRequestVault(agent.id, record.id, pf.sats, pf.serverKey) }
+  }
+
+  /** The rules still apply at execute time; a denial there is a decision of the rules. */
+  private async denyAtExecute (id: string, agentId: string, reason: string): Promise<Outcome> {
+    const record = await this.store.updateRequest(id, { status: 'denied', reason, decidedBy: 'rules' })
+    await this.log('rules', 'request.decided', { requestId: id, agentId, decision: 'denied', reason, atExecute: true })
+    return { kind: 'record', record, httpStatus: 403 }
   }
 
   /** POST /v1/requests/:id/sign: complete, broadcast and deliver the payment the agent signed. */
@@ -221,7 +235,7 @@ export class SpendControl {
   }
 
   async getOwnRequest (agent: Agent, id: string): Promise<PaymentRequestRecord> {
-    await this.store.expireStale(this.now(), this.ttl)
+    await this.expireStale()
     const record = await this.store.getRequest(id)
     // Another agent's request is reported as missing, not as forbidden.
     if (record === undefined || record.agentId !== agent.id) throw new ProxyError(404, 'request not found')
@@ -270,7 +284,9 @@ export class SpendControl {
     const rv = await this.vault.markRequestVaultReclaimed(requestId, txid)
     const record = await this.store.getRequest(requestId)
     if (record?.status === 'approved') {
-      await this.store.updateRequest(requestId, { status: 'failed', reason: 'the company reclaimed the approval funds' })
+      const reason = 'the company reclaimed the approval funds'
+      await this.store.updateRequest(requestId, { status: 'failed', reason })
+      await this.log('company', 'request.failed', { requestId, agentId: record.agentId, reason })
     }
     return rv
   }
@@ -280,7 +296,9 @@ export class SpendControl {
   }
 
   async expireStale (): Promise<void> {
-    await this.store.expireStale(this.now(), this.ttl)
+    for (const r of await this.store.expireStale(this.now(), this.ttl)) {
+      await this.log('rules', 'request.expired', { requestId: r.id, agentId: r.agentId, was: r.was })
+    }
   }
 
   private async decide (id: string, patch: Partial<PaymentRequestRecord>, before?: (record: PaymentRequestRecord) => Promise<void>): Promise<PaymentRequestRecord> {
@@ -292,6 +310,10 @@ export class SpendControl {
       if (current.status !== 'pending') throw new ProxyError(409, `request is ${current.status}, not pending`)
       if (before !== undefined) await before(current)
       const decided = await this.store.updateRequest(id, { ...patch, decidedAt: this.now() })
+      // Approving is the company funding the payment from its wallet; denying is the admin on the dashboard.
+      await this.log(patch.status === 'approved' ? 'company' : 'admin', 'request.decided', {
+        requestId: id, agentId: decided.agentId, decision: patch.status, priceSats: decided.priceSats, reason: patch.reason
+      })
       await this.notify(n => n.decided(decided))
       return decided
     })
@@ -311,16 +333,31 @@ export class SpendControl {
     try {
       answer = await callMerchant(callOf(record), payment.headers)
     } catch (err) {
-      return { kind: 'record', record: await this.store.updateRequest(id, { reason: `merchant unreachable after payment: ${errorMessage(err)}` }), httpStatus: 502 }
+      return await this.notDelivered(record, payment, `merchant unreachable after payment: ${errorMessage(err)}`)
     }
     if (answer.status >= 200 && answer.status < 300) {
-      return { kind: 'record', record: await this.store.updateRequest(id, { status: 'paid', reason: null, response: answer }), httpStatus: 200 }
+      const paid = await this.store.updateRequest(id, { status: 'paid', reason: null, response: answer })
+      await this.log(`agent:${record.agentId}`, 'request.paid', { requestId: id, agentId: record.agentId, txid: payment.txid, priceSats: payment.priceSats, merchantStatus: answer.status })
+      return { kind: 'record', record: paid, httpStatus: 200 }
     }
-    return {
-      kind: 'record',
-      record: await this.store.updateRequest(id, { reason: `merchant answered ${answer.status} after payment`, response: answer }),
-      httpStatus: 502
-    }
+    return await this.notDelivered(record, payment, `merchant answered ${answer.status} after payment`, answer)
+  }
+
+  private async notDelivered (record: PaymentRequestRecord, payment: FinalizedPayment, reason: string, answer?: MerchantAnswer): Promise<Outcome> {
+    const updated = await this.store.updateRequest(record.id, { reason, response: answer })
+    await this.log(`agent:${record.agentId}`, 'request.paid_not_delivered', { requestId: record.id, agentId: record.agentId, txid: payment.txid, priceSats: payment.priceSats, reason })
+    return { kind: 'record', record: updated, httpStatus: 502 }
+  }
+
+  /** request.created: what was asked, by whom, at what price (never the request body). */
+  private async logCreated (r: PaymentRequestRecord): Promise<void> {
+    await this.log(`agent:${r.agentId}`, 'request.created', {
+      requestId: r.id, agentId: r.agentId, url: r.url, method: r.method, purpose: r.purpose, priceSats: r.priceSats, status: r.status
+    })
+  }
+
+  private async log (actor: AuditActor, type: AuditType, data: Record<string, unknown>): Promise<void> {
+    await this.audit.append(actor, type, data)
   }
 
   private async notify (call: (n: Notifier) => Promise<void>): Promise<void> {
