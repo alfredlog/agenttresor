@@ -8,7 +8,7 @@
  *
  * Block headers never change once buried, so verified roots are cached.
  */
-import type { ChainTracker } from '@bsv/sdk'
+import type { ChainTracker } from './bsv.js'
 import { arcadeUrl } from './network.js'
 
 export class ArcadeChainTracker implements ChainTracker {

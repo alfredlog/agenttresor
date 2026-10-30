@@ -5,8 +5,8 @@
  */
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { CachedKeyDeriver, PrivateKey } from '@bsv/sdk'
 import { Monitor, Services, Setup, StorageKnex, Wallet, WalletStorageManager } from '@bsv/wallet-toolbox'
+import { CachedKeyDeriver, PrivateKey } from './bsv.js'
 import { arcadeUrl, getNetwork, type BsvNetwork } from './network.js'
 
 export interface ServerWalletOptions {
