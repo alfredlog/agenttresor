@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../src/agent/vault-signer'
-import { fundVault, reclaimVault } from '../src/company/vault-client'
+import { approveAndFund, fundVault, reclaimVault } from '../src/company/vault-client'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
 import { PolicyKeys } from '../src/vault/keys'
 import { vaultLockingScript, signVaultInput, checksigBytes, SPEND_UNLOCK_LENGTH } from '../src/vault/script'
@@ -112,12 +112,12 @@ describe('paying from the vault', () => {
     expect((await budget(agent)).vault).toEqual(vaultBefore)
   })
 
-  it('approval flow: pending, approve, execute, sign, paid', async () => {
+  it('approval flow: pending, company funds it, execute, sign, paid', async () => {
     const agent = await h.createAgent('approval-bot', rules(), 10_000)
     const res = await h.pay(agent, { url: `${merchant}/api/hotel/book`, method: 'POST', body: { roomType: 'standard', nights: 1 }, purpose: 'Hotel' })
     expect(res.status).toBe(202)
     const id = res.body.requestId
-    expect((await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })).status).toBe(200)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
     const exec = await h.call(`/v1/requests/${id}/execute`, agent.key, { method: 'POST' })
     expect(exec.status).toBe(200)
     expect(exec.body).toMatchObject({ status: 'sign', requestId: id, merchantOutput: { satoshis: ROOM_RATES_SATS.standard } })

@@ -6,8 +6,11 @@
  * Checked before signing:
  *  - exactly one input, locked by a vault script that names this agent's key;
  *  - output 0 pays exactly the price the agent expects, to the announced script;
- *  - output 1 returns the change to the same vault script, and there is nothing else;
- *  - the fee (input - outputs) is what the proxy announced, and at most `maxFeeSats`.
+ *  - either output 1 returns the change to the same vault script (the agent's
+ *    vault), or there is no output 1 (a request vault the company funded for
+ *    exactly this payment); nothing else;
+ *  - the fee (input - outputs) is what the proxy announced, and at most `maxFeeSats`
+ *    (in the 1-output form everything but the price is fee, so this bounds the vault).
  * The input value comes from the proxy, but BIP-143 signs it: if it is wrong,
  * the signature is invalid on chain and nothing can be spent with it.
  */
@@ -43,16 +46,16 @@ export function signVaultPayment (answer: VaultSignAnswer, agentKey: PrivateKey,
 
   const tx = Transaction.fromHex(answer.unsignedTx)
   if (tx.inputs.length !== 1) refuse(`expected 1 input, got ${tx.inputs.length}`)
-  if (tx.outputs.length !== 2) refuse(`expected 2 outputs, got ${tx.outputs.length}`)
+  if (tx.outputs.length !== 1 && tx.outputs.length !== 2) refuse(`expected 1 or 2 outputs, got ${tx.outputs.length}`)
   const [pay, change] = tx.outputs
   if (pay.satoshis !== expectedPriceSats) refuse(`output 0 pays ${String(pay.satoshis)} sats, expected ${expectedPriceSats}`)
   if (answer.merchantOutput.satoshis !== expectedPriceSats) refuse('the announced price differs from the expected price')
   if (pay.lockingScript.toHex() !== answer.merchantOutput.lockingScript || !P2PKH.test(answer.merchantOutput.lockingScript)) {
     refuse('output 0 is not the announced merchant P2PKH output')
   }
-  if (change.lockingScript.toHex() !== answer.sourceLockingScript) refuse('output 1 does not return the change to the vault')
+  if (change !== undefined && change.lockingScript.toHex() !== answer.sourceLockingScript) refuse('output 1 does not return the change to the vault')
 
-  const fee = answer.sourceSatoshis - expectedPriceSats - (change.satoshis ?? 0)
+  const fee = answer.sourceSatoshis - expectedPriceSats - (change?.satoshis ?? 0)
   if (!Number.isSafeInteger(fee) || fee < 0) refuse('outputs exceed the vault balance')
   if (fee !== answer.feeSats) refuse(`fee is ${fee} sats, announced ${answer.feeSats}`)
   if (fee > maxFeeSats) refuse(`fee ${fee} sats is above the limit of ${maxFeeSats}`)

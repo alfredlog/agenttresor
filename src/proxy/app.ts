@@ -216,8 +216,14 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     res.json({ requests: rows.map(r => ({ ...requestView(r), agentId: r.agentId, agentName: r.agentName })) })
   }))
 
+  // Approval = funding: the body is the company's request-vault funding transaction.
+  admin.get('/requests/:id/approval', wrap(async (req, res) => {
+    res.json(await control.approvalInfo(String(req.params.id)))
+  }))
+
   admin.post('/requests/:id/approve', wrap(async (req, res) => {
-    res.json(requestView(await control.approve(String(req.params.id), 'admin')))
+    const funding = (req.body ?? {}) as Record<string, unknown>
+    res.json(requestView(await control.approve(String(req.params.id), 'company', funding)))
   }))
 
   admin.post('/requests/:id/deny', wrap(async (req, res) => {
@@ -279,6 +285,44 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     const { txid } = (req.body ?? {}) as Record<string, unknown>
     const v = await vault.markReclaimed(await knownAgent(String(req.params.agentId)), txid)
     res.json({ agentId: v.agentId, status: v.status, explorerUrl: txLink(String(txid), network) })
+  }))
+
+  // ── Request vaults (one per approved payment; reclaimable if not spent) ──
+  admin.get('/request-vaults', wrap(async (req, res) => {
+    const status = req.query.status
+    if (status !== undefined && !['open', 'spent', 'reclaimed'].includes(String(status))) {
+      res.status(400).json({ error: 'status must be open, spent or reclaimed' }); return
+    }
+    await control.expireStale()
+    const list = await vault.listRequestVaults(status as 'open' | 'spent' | 'reclaimed' | undefined)
+    res.json({
+      network,
+      requestVaults: list.map(v => ({
+        requestId: v.requestId,
+        agentId: v.agentId,
+        agentName: v.agentName,
+        purpose: v.purpose,
+        url: v.url,
+        priceSats: v.priceSats,
+        satoshis: v.satoshis,
+        status: v.status,
+        requestStatus: v.requestStatus,
+        // An open vault whose request can no longer be paid is waiting to be reclaimed.
+        reclaimable: v.status === 'open' && v.requestStatus !== 'approved',
+        outpoint: `${v.txid}.${v.vout}`,
+        explorerUrl: txLink(v.closingTxid ?? v.txid, network)
+      }))
+    })
+  }))
+
+  admin.get('/request-vaults/:requestId/utxo', wrap(async (req, res) => {
+    res.json(await vault.requestVaultUtxo(String(req.params.requestId)))
+  }))
+
+  admin.post('/request-vaults/:requestId/reclaimed', wrap(async (req, res) => {
+    const { txid } = (req.body ?? {}) as Record<string, unknown>
+    const rv = await control.requestVaultReclaimed(String(req.params.requestId), txid)
+    res.json({ requestId: rv.requestId, status: rv.status, explorerUrl: txLink(String(txid), network) })
   }))
 
   app.use('/admin', admin)

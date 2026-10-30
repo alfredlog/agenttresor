@@ -1,15 +1,19 @@
 /**
  * Spend control: every payment an agent asks for is priced by an unpaid
- * preflight, checked against the company's rules and the vault balance, then
- * built as a vault transaction for the agent to sign (or held for a human, or
- * refused). Every request is kept in the ledger.
+ * preflight and checked against the company's rules, then
+ *  - under the approval threshold: paid from the agent's vault (the agent signs);
+ *  - above it: held until the company approves it by funding a request vault
+ *    for exactly this payment from its own wallet, then paid from that vault;
+ *  - against the rules: refused.
+ * Every request is kept in the ledger.
  *
  * Requests of one agent are serialized (rules check + payment), so two
  * concurrent requests cannot both pass the daily budget. This lock is per
  * process: run one proxy process per database.
  */
 import { randomBytes } from 'node:crypto'
-import type { VaultService, SignRequest, FinalizedPayment } from '../vault/service.js'
+import type { FundingBody, FinalizedPayment, SignRequest, VaultService } from '../vault/service.js'
+import type { RequestVault } from '../vault/store.js'
 import { ProxyError } from './errors.js'
 import { callMerchant, preflight, type MerchantCall } from '../shared/merchant.js'
 import type { Notifier } from './notifier.js'
@@ -116,22 +120,27 @@ export class SpendControl {
       const spent = await this.store.spentSince(agent.id, dayStart(now))
       const decision = evaluate(rules, spent, host, pf.sats)
       if (decision.decision === 'deny') return await refuse('denied', decision.reason, 403, priced)
-      // The vault balance is a hard on-chain cap: no point asking a human for more than it holds.
-      const short = await this.vault.capacityProblem(agent.id, pf.sats)
-      if (short !== undefined) return await refuse('denied', short, 403, priced)
 
+      // Above the threshold the company funds the payment itself when it approves it.
       if (decision.decision === 'needs_approval') {
         const record = await this.store.insertRequest({ ...base, ...priced, status: 'pending' })
         await this.notify(n => n.approvalNeeded(record))
         return { kind: 'record', record, httpStatus: 202 }
       }
 
+      // The agent's vault balance is a hard on-chain cap.
+      const short = await this.vault.capacityProblem(agent.id, pf.sats)
+      if (short !== undefined) return await refuse('denied', short, 403, priced)
+
       const record = await this.store.insertRequest({ ...base, ...priced, status: 'approved', decidedAt: now, decidedBy: 'rules' })
       return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
     })
   }
 
-  /** POST /v1/requests/:id/execute: build the vault payment of an approved request. */
+  /**
+   * POST /v1/requests/:id/execute: build the payment of an approved request,
+   * from its request vault if the company funded one, else from the agent's vault.
+   */
   async execute (agent: Agent, id: string): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
       const record = await this.getOwnRequest(agent, id)
@@ -155,6 +164,8 @@ export class SpendControl {
       const fail = async (reason: string): Promise<Outcome> => ({
         kind: 'record', record: await this.store.updateRequest(id, { status: 'failed', reason }), httpStatus: 409
       })
+      const rv = await this.vault.requestVault(id)
+      if (rv !== undefined) return await this.executeFromRequestVault(agent, record, rv, pf, fail)
       if (pf.sats > (record.priceSats ?? 0)) {
         return await fail(`price rose from ${String(record.priceSats)} to ${pf.sats} sats after approval; nothing paid`)
       }
@@ -172,6 +183,31 @@ export class SpendControl {
       if (short !== undefined) throw new ProxyError(403, short)
       return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
     })
+  }
+
+  /** The company funded exactly this payment: the price must not have changed at all. */
+  private async executeFromRequestVault (
+    agent: Agent,
+    record: PaymentRequestRecord,
+    rv: RequestVault,
+    pf: { sats: number, serverKey: string },
+    fail: (reason: string) => Promise<Outcome>
+  ): Promise<Outcome> {
+    if (rv.status !== 'open') throw new ProxyError(409, `the request vault is ${rv.status}`)
+    if (pf.sats !== record.priceSats) {
+      return await fail(`price changed from ${String(record.priceSats)} to ${pf.sats} sats after approval; nothing paid, the company can reclaim the request vault`)
+    }
+    if (record.serverKey !== null && pf.serverKey !== record.serverKey) {
+      return await fail('merchant identity key changed after approval; nothing paid, the company can reclaim the request vault')
+    }
+    // The approval funds the payment; host, per-payment and daily limits still apply.
+    const now = this.now()
+    const rules = await this.store.getRules(agent.id)
+    const decision = evaluate(rules, await this.store.spentSince(agent.id, dayStart(now)), new URL(record.url).host, pf.sats)
+    if (decision.decision === 'deny') {
+      return { kind: 'record', record: await this.store.updateRequest(record.id, { status: 'denied', reason: decision.reason, decidedBy: 'rules' }), httpStatus: 403 }
+    }
+    return { kind: 'sign', record, sign: await this.vault.prepareFromRequestVault(agent.id, record.id, pf.sats, pf.serverKey) }
   }
 
   /** POST /v1/requests/:id/sign: complete, broadcast and deliver the payment the agent signed. */
@@ -205,8 +241,38 @@ export class SpendControl {
     }
   }
 
-  async approve (id: string, by: string): Promise<PaymentRequestRecord> {
-    return await this.decide(id, { status: 'approved', decidedBy: by })
+  /** GET /admin/requests/:id/approval: what the company funds to approve this payment. */
+  async approvalInfo (id: string): Promise<Record<string, unknown>> {
+    await this.expireStale()
+    const record = await this.store.getRequest(id)
+    if (record === undefined) throw new ProxyError(404, 'request not found')
+    if (record.status !== 'pending') throw new ProxyError(409, `request is ${record.status}, not pending`)
+    const agent = (await this.store.getAgent(record.agentId))!
+    const info = await this.vault.approvalInfo(record.agentId, record.priceSats!)
+    return { requestId: id, agentId: agent.id, agentName: agent.name, purpose: record.purpose, url: record.url, method: record.method, priceSats: record.priceSats, ...info }
+  }
+
+  /**
+   * POST /admin/requests/:id/approve: approving a payment above the threshold
+   * means funding it. Without a verified request vault nothing is approved.
+   */
+  async approve (id: string, by: string, funding: FundingBody): Promise<PaymentRequestRecord> {
+    return await this.decide(id, { status: 'approved', decidedBy: by }, async record => {
+      if (funding.beef === undefined) {
+        throw new ProxyError(400, 'approving a payment above the threshold takes funding it from the company wallet (vault.html?approve=<id>)')
+      }
+      await this.vault.fundRequest(record.agentId, id, record.priceSats!, funding)
+    })
+  }
+
+  /** The company reclaimed a request vault: a still-approved request can no longer be paid. */
+  async requestVaultReclaimed (requestId: string, txid: unknown): Promise<RequestVault> {
+    const rv = await this.vault.markRequestVaultReclaimed(requestId, txid)
+    const record = await this.store.getRequest(requestId)
+    if (record?.status === 'approved') {
+      await this.store.updateRequest(requestId, { status: 'failed', reason: 'the company reclaimed the approval funds' })
+    }
+    return rv
   }
 
   async deny (id: string, by: string, reason: string): Promise<PaymentRequestRecord> {
@@ -217,13 +283,14 @@ export class SpendControl {
     await this.store.expireStale(this.now(), this.ttl)
   }
 
-  private async decide (id: string, patch: Partial<PaymentRequestRecord>): Promise<PaymentRequestRecord> {
+  private async decide (id: string, patch: Partial<PaymentRequestRecord>, before?: (record: PaymentRequestRecord) => Promise<void>): Promise<PaymentRequestRecord> {
     await this.expireStale()
     const record = await this.store.getRequest(id)
     if (record === undefined) throw new ProxyError(404, 'request not found')
     return await this.withAgentLock(record.agentId, async () => {
       const current = (await this.store.getRequest(id))!
       if (current.status !== 'pending') throw new ProxyError(409, `request is ${current.status}, not pending`)
+      if (before !== undefined) await before(current)
       const decided = await this.store.updateRequest(id, { ...patch, decidedAt: this.now() })
       await this.notify(n => n.decided(decided))
       return decided

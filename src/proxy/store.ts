@@ -129,6 +129,29 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
       await k.schema.dropTable('vault_txs')
       await k.schema.dropTable('vaults')
     }
+  },
+  '003_request_vaults': {
+    async up (k) {
+      // One vault UTXO per payment a human approved: the company's approval is this funding.
+      await k.schema.createTable('request_vaults', t => {
+        t.string('request_id').primary().references('requests.id')
+        t.string('agent_id').notNullable().references('agents.id')
+        t.string('txid').notNullable()
+        t.integer('vout').notNullable()
+        t.bigInteger('satoshis').notNullable()
+        t.text('locking_script').notNullable()
+        t.string('company_pub').notNullable()
+        t.text('beef').notNullable()
+        t.string('status').notNullable()
+        t.string('closing_txid')
+        t.bigInteger('created_at').notNullable()
+        t.bigInteger('updated_at').notNullable()
+        t.index(['status'])
+      })
+    },
+    async down (k) {
+      await k.schema.dropTable('request_vaults')
+    }
   }
 }
 

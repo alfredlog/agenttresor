@@ -18,7 +18,7 @@ import type { Wallet } from '@bsv/wallet-toolbox'
 import { AGENT_KEY_FILE, loadOrCreateAgentKey, registerAgentKey } from '../src/agent/keys'
 import { AgentPayer } from '../src/agent/pay'
 import { ProxyClient } from '../src/agent/proxy-client'
-import { fundVault } from '../src/company/vault-client'
+import { approveAndFund, fundVault } from '../src/company/vault-client'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
 import { createMcpHttpApp } from '../src/mcp/http'
 import { createAgentMcpServer } from '../src/mcp/server'
@@ -147,7 +147,7 @@ describe('paying', () => {
     expect(agent.calls).toEqual([])
   })
 
-  it('above the threshold: pending; once the company approves, check_request pays it', async () => {
+  it('above the threshold: pending; once the company funds it, check_request pays it from the request vault', async () => {
     const agent = await startAgent('approval-bot', 20_000)
     const body = { roomType: 'standard', nights: 1 }
     const r = await agent.payer.payAndFetch({ url: `${merchant}/api/hotel/book`, method: 'POST', body, purpose: 'Hotel for the Munich trip', maxSats: 5_000 })
@@ -155,14 +155,16 @@ describe('paying', () => {
     const id = (r as any).requestId
 
     expect(await agent.payer.checkRequest(id)).toMatchObject({ status: 'pending', requestId: id })
-    // Today the company approves on the dashboard (admin API).
-    expect((await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })).status).toBe(200)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
 
-    const before = await spendableSats(merchantWallet)
+    const [before, vaultBefore] = [await spendableSats(merchantWallet), await agent.vault()]
+    agent.calls.length = 0
     const done = await agent.payer.checkRequest(id)
     expect(done).toMatchObject({ status: 'paid', requestId: id, satoshis: ROOM_RATES_SATS.standard })
     expect((done as any).response.body.order).toMatchObject(body)
+    expect(agent.calls).toEqual([`GET /v1/requests/${id}`, `POST /v1/requests/${id}/execute`, `POST /v1/requests/${id}/sign`])
     expect(await spendableSats(merchantWallet)).toBe(before + ROOM_RATES_SATS.standard)
+    expect(await agent.vault()).toEqual(vaultBefore) // paid from the request vault, not the agent's
     expect(await agent.payer.checkRequest(id)).toMatchObject({ status: 'paid', txid: (done as any).txid }) // idempotent
   })
 
@@ -214,6 +216,20 @@ describe('MCP server', () => {
     expect(paid.isError).toBe(false)
     expect(textOf(paid)).toMatch(/^Paid 500 sats from the company vault \(txid [0-9a-f]{64}\)/)
     expect(textOf(paid)).toContain('"reportId"')
+
+    // Above the threshold through the tools: pending, the company funds it, check_request pays it.
+    const hotel = { url: `${merchant}/api/hotel/book`, method: 'POST', body: { roomType: 'standard', nights: 1 } }
+    const pending = await mcp.callTool({ name: 'pay_and_fetch', arguments: { ...hotel, purpose: 'Hotel for the user\'s trip', maxSats: 5_000 } })
+    expect(textOf(pending)).toMatch(/^Waiting for approval: request R-[0-9A-F]{10} \(2000 sats\).*funding it from its wallet/)
+    const requestId = /request (R-[0-9A-F]{10})/.exec(textOf(pending))![1]
+    expect(textOf(await mcp.callTool({ name: 'check_request', arguments: { requestId } }))).toMatch(/^Waiting for approval/)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, requestId)
+    const vaultBefore = await agent.vault()
+    const approvedPaid = await mcp.callTool({ name: 'check_request', arguments: { requestId } })
+    expect(approvedPaid.isError).toBe(false)
+    expect(textOf(approvedPaid)).toMatch(/^Paid 2000 sats from the company vault \(txid [0-9a-f]{64}\)/)
+    expect(textOf(approvedPaid)).toContain('"bookingId"')
+    expect(await agent.vault()).toEqual(vaultBefore)
 
     const refused = await mcp.callTool({ name: 'pay_and_fetch', arguments: { url: report.url, purpose: 'Too cheap a limit', maxSats: 100 } })
     expect(textOf(refused)).toMatch(/Refused by your own maxSats limit/)

@@ -37,12 +37,31 @@
     #log li.ok { border-color: var(--ok); }
     #log li.error { border-color: var(--bad); color: var(--bad); }
     .time { color: var(--muted); font-size: 12px; margin-right: 6px; }
+    #approval { border-color: var(--ok); }
+    #approval dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 4px; }
+    #approval dt { color: var(--muted); }
+    #approval dd { margin: 0; word-break: break-all; }
+    #approval .total { font-weight: 600; }
+    button.ok { border-color: var(--ok); color: var(--ok); }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
 <main>
   <h1>Agent vaults</h1>
   <div class="muted">Fund an agent's vault from BSV Desktop, or take it back. Payments from a vault need the agent's and the policy's signatures; you can always reclaim alone. <a href="/">Dashboard</a></div>
+
+  <section id="approval-section" hidden>
+    <h2>Approve a payment</h2>
+    <div id="approval" class="card">
+      <div id="approval-details" class="muted">Enter the admin token to load the request.</div>
+      <div class="actions">
+        <button id="approve" class="ok" hidden>Approve and fund with BSV Desktop</button>
+      </div>
+      <div class="muted" style="margin-top:10px">Approving funds this one payment from your wallet: price plus network fee, locked so that only
+        this agent and the policy together can spend it, or you alone can take it back. Nothing is paid until the agent executes it.</div>
+    </div>
+  </section>
 
   <h2>Fund or reclaim</h2>
   <div class="card">
@@ -62,6 +81,12 @@
   <div class="table"><table>
     <thead><tr><th>Agent</th><th>Name</th><th>Status</th><th class="num">Sats</th><th>Last transaction</th></tr></thead>
     <tbody id="vaults"><tr><td colspan="5" class="muted">Enter the admin token.</td></tr></tbody>
+  </table></div>
+
+  <h2>Approved payments <span class="muted">(request vaults)</span></h2>
+  <div class="table"><table>
+    <thead><tr><th>Request</th><th>Agent</th><th>Purpose</th><th class="num">Sats</th><th>Vault</th><th>Request</th><th></th></tr></thead>
+    <tbody id="request-vaults"><tr><td colspan="7" class="muted">Enter the admin token.</td></tr></tbody>
   </table></div>
 
   <h2>Activity</h2>

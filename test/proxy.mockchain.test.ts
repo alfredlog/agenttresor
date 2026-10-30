@@ -7,10 +7,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type Express } from 'express'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { createPaymentMiddleware } from '../src/shared/brc121'
+import { approveAndFund, reclaimRequestVault } from '../src/company/vault-client'
 import { createMerchantApp, ROOM_RATES_SATS } from '../src/merchant/app'
 import type { Notifier } from '../src/proxy/notifier'
 import type { PaymentRequestRecord } from '../src/proxy/store'
-import { createProxyHarness, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
+import { ADMIN_TOKEN, createProxyHarness, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
 
 let h: ProxyHarness
 let merchantWallet: Wallet, flakyWallet: Wallet
@@ -84,7 +85,7 @@ describe('spend-control proxy', () => {
     expect(res.body.reason).toMatch(/maximum per payment/)
   })
 
-  it('holds a payment above the threshold; approve, then execute and sign pay it', async () => {
+  it('holds a payment above the threshold; the company funds it, then execute and sign pay it', async () => {
     const res = await h.pay(agent, { url: `${merchant}/api/hotel/book`, method: 'POST', body: { roomType: 'standard', nights: 1 }, purpose: 'Hotel for the Munich trip' })
     expect(res.status).toBe(202)
     expect(res.body).toMatchObject({ status: 'pending', requestId: expect.stringMatching(/^R-/) })
@@ -95,8 +96,10 @@ describe('spend-control proxy', () => {
     const pending = await h.admin('/admin/requests?status=pending')
     expect(pending.body.requests.map((r: any) => r.requestId)).toContain(id)
 
-    const approved = await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })
-    expect(approved.body).toMatchObject({ status: 'approved', decidedBy: 'admin' })
+    // A plain approval is refused: approving means funding.
+    expect((await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })).status).toBe(400)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    expect((await h.call(`/v1/requests/${id}`, agent.key)).body).toMatchObject({ status: 'approved', decidedBy: 'company' })
     expect(notifier.decisions.map(r => r.id)).toContain(id)
 
     const before = await spendableSats(merchantWallet)
@@ -121,19 +124,25 @@ describe('spend-control proxy', () => {
     expect((await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })).status).toBe(409)
   })
 
-  it('refuses to execute when the price rose after approval, and builds nothing', async () => {
+  it('refuses to execute when the price changed after approval, builds nothing, and the company reclaims', async () => {
     flakyState.price = 1_500
     const res = await h.pay(agent, { url: `${flaky}/item`, purpose: 'Widget' })
     expect(res.status).toBe(202)
     const id = res.body.requestId
-    await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })
+    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
     flakyState.price = 1_800
     const [vaultBefore, flakyBefore] = [(await h.call('/v1/budget', agent.key)).body.vault, await spendableSats(flakyWallet)]
     const exec = await h.call(`/v1/requests/${id}/execute`, agent.key, { method: 'POST' })
+    flakyState.price = 800
     expect(exec.status).toBe(409)
-    expect(exec.body).toMatchObject({ status: 'failed', reason: expect.stringMatching(/price rose from 1500 to 1800/) })
+    expect(exec.body).toMatchObject({ status: 'failed', reason: expect.stringMatching(/price changed from 1500 to 1800/) })
     expect((await h.call('/v1/budget', agent.key)).body.vault).toEqual(vaultBefore)
     expect(await spendableSats(flakyWallet)).toBe(flakyBefore)
+
+    const companyBefore = await spendableSats(h.company)
+    const reclaimed = await reclaimRequestVault(h.company, h.url, ADMIN_TOKEN, id)
+    expect(reclaimed.satoshis).toBe(funded.satoshis)
+    expect(await spendableSats(h.company)).toBeGreaterThan(companyBefore + funded.satoshis - 100)
   })
 
   it('records paid_not_delivered when the merchant fails after payment, and counts it in the budget', async () => {

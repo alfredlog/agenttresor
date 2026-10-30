@@ -15,7 +15,7 @@ export const SERVER_INSTRUCTIONS = [
   'Give pay_and_fetch a real, specific purpose: it is stored in the company\'s audit log.',
   'Set maxSats to the most you are willing to pay; the payment is refused above it.',
   'If a payment is refused (denied), explain the reason to the user instead of retrying.',
-  'If it is pending, the company must approve it: tell the user the request id and use check_request later.'
+  'If it is pending, the company must approve it by funding it from its wallet: tell the user the request id and use check_request later.'
 ].join(' ')
 
 const MAX_TEXT = 20_000
@@ -48,7 +48,8 @@ export function describePayResult (r: PayResult | { status: string, [k: string]:
     case 'pending': {
       const p = r as Extract<PayResult, { status: 'pending' }>
       return reply(`Waiting for approval: request ${p.requestId} (${p.satoshis} sats) is above the company's approval threshold. ` +
-        'The company must approve it. Tell the user the request id and call check_request later; do not ask for the same payment again.', r)
+        'The company must approve it by funding it from its wallet. Tell the user the request id and call check_request later; ' +
+        'do not ask for the same payment again.', r)
     }
     case 'denied': {
       const p = r as Extract<PayResult, { status: 'denied' }>
@@ -142,8 +143,8 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
 
   server.registerTool('check_request', {
     title: 'Check request',
-    description: 'Shows the status of an earlier payment request (R-…). If the company has approved it, pays it now ' +
-      '(the same checks and signing as pay_and_fetch) and returns the merchant\'s answer.',
+    description: 'Shows the status of an earlier payment request (R-…). If the company has approved (funded) it, pays it now ' +
+      'from the funds the company set aside for it (the same price check and signing as pay_and_fetch) and returns the merchant\'s answer.',
     inputSchema: { requestId: z.string().regex(/^R-[0-9A-F]{10}$/).describe('The request id, e.g. R-3F9A1C2B7D') },
     annotations: { openWorldHint: true }
   }, async ({ requestId }) => await safe(async () => describePayResult(await opts.payer.checkRequest(requestId))))
