@@ -18,5 +18,8 @@ export const CachedKeyDeriver = sdk.CachedKeyDeriver
 export type CachedKeyDeriver = Sdk.CachedKeyDeriver
 export const PrivateKey = sdk.PrivateKey
 export type PrivateKey = Sdk.PrivateKey
+export const Transaction = sdk.Transaction
+export type Transaction = Sdk.Transaction
+export const Utils = sdk.Utils
 
 export type { ChainTracker, WalletInterface } from '@bsv/sdk'

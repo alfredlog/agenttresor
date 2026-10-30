@@ -1,0 +1,246 @@
+/**
+ * Proxy storage (knex + better-sqlite3). Migrations live in code and run on open.
+ * API keys are stored as sha256 only.
+ */
+import { mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
+import makeKnex, { type Knex } from 'knex'
+import { DEFAULT_RULES, type Rules } from './rules.js'
+
+export type RequestStatus = 'pending' | 'approved' | 'denied' | 'paid' | 'paid_not_delivered' | 'failed' | 'expired'
+export const REQUEST_STATUSES: RequestStatus[] = ['pending', 'approved', 'denied', 'paid', 'paid_not_delivered', 'failed', 'expired']
+/** Statuses whose satoshis have left the wallet: both count against the budget. */
+export const SPENT_STATUSES: RequestStatus[] = ['paid', 'paid_not_delivered']
+
+export interface Agent {
+  id: string
+  name: string
+  keyHint: string
+  createdAt: number
+}
+
+/** What the merchant answered (stored for the agent and the audit log). */
+export interface MerchantAnswer {
+  status: number
+  contentType: string | null
+  body: unknown
+}
+
+export interface PaymentRequestRecord {
+  id: string
+  agentId: string
+  url: string
+  method: string
+  body: unknown
+  purpose: string
+  priceSats: number | null
+  /** Merchant identity key from the 402 challenge. */
+  serverKey: string | null
+  status: RequestStatus
+  reason: string | null
+  txid: string | null
+  response: MerchantAnswer | null
+  createdAt: number
+  decidedAt: number | null
+  decidedBy: string | null
+  paidAt: number | null
+}
+
+const MIGRATIONS: Record<string, Knex.Migration> = {
+  '001_initial': {
+    async up (k) {
+      await k.schema.createTable('agents', t => {
+        t.string('id').primary()
+        t.string('name').notNullable()
+        t.string('key_hash').notNullable().unique()
+        t.string('key_hint').notNullable()
+        t.bigInteger('created_at').notNullable()
+      })
+      await k.schema.createTable('rules', t => {
+        t.string('agent_id').primary().references('agents.id')
+        t.text('allowed_hosts').notNullable()
+        t.bigInteger('max_per_payment_sats').notNullable()
+        t.bigInteger('daily_budget_sats').notNullable()
+        t.bigInteger('approval_threshold_sats').notNullable()
+      })
+      await k.schema.createTable('requests', t => {
+        t.string('id').primary()
+        t.string('agent_id').notNullable().references('agents.id')
+        t.text('url').notNullable()
+        t.string('method').notNullable()
+        t.text('body')
+        t.text('purpose').notNullable()
+        t.bigInteger('price_sats')
+        t.string('server_key')
+        t.string('status').notNullable()
+        t.text('reason')
+        t.string('txid')
+        t.text('response')
+        t.bigInteger('created_at').notNullable()
+        t.bigInteger('decided_at')
+        t.string('decided_by')
+        t.bigInteger('paid_at')
+        t.index(['agent_id', 'status'])
+        t.index(['status'])
+      })
+    },
+    async down (k) {
+      await k.schema.dropTable('requests')
+      await k.schema.dropTable('rules')
+      await k.schema.dropTable('agents')
+    }
+  }
+}
+
+const migrationSource: Knex.MigrationSource<string> = {
+  getMigrations: async () => Object.keys(MIGRATIONS),
+  getMigrationName: name => name,
+  getMigration: async name => MIGRATIONS[name]
+}
+
+/** Opens (and migrates) the proxy database. Use ':memory:' in tests. */
+export async function openProxyDb (filename = './data/proxy.sqlite'): Promise<Knex> {
+  if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true })
+  const db = makeKnex({ client: 'better-sqlite3', connection: { filename }, useNullAsDefault: true, pool: { min: 1, max: 1 } })
+  await db.migrate.latest({ migrationSource, tableName: 'proxy_migrations' })
+  return db
+}
+
+const json = (v: unknown): string | null => v === undefined || v === null ? null : JSON.stringify(v)
+const parse = (v: string | null): any => v === null ? null : JSON.parse(v)
+
+function toRecord (row: any): PaymentRequestRecord {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    url: row.url,
+    method: row.method,
+    body: parse(row.body),
+    purpose: row.purpose,
+    priceSats: row.price_sats,
+    serverKey: row.server_key,
+    status: row.status,
+    reason: row.reason,
+    txid: row.txid,
+    response: parse(row.response),
+    createdAt: row.created_at,
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+    paidAt: row.paid_at
+  }
+}
+
+function toRow (r: Partial<PaymentRequestRecord>): Record<string, unknown> {
+  const map: Record<string, [string, (v: any) => unknown]> = {
+    id: ['id', v => v],
+    agentId: ['agent_id', v => v],
+    url: ['url', v => v],
+    method: ['method', v => v],
+    body: ['body', json],
+    purpose: ['purpose', v => v],
+    priceSats: ['price_sats', v => v],
+    serverKey: ['server_key', v => v],
+    status: ['status', v => v],
+    reason: ['reason', v => v],
+    txid: ['txid', v => v],
+    response: ['response', json],
+    createdAt: ['created_at', v => v],
+    decidedAt: ['decided_at', v => v],
+    decidedBy: ['decided_by', v => v],
+    paidAt: ['paid_at', v => v]
+  }
+  const row: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(r)) {
+    if (v !== undefined && k in map) row[map[k][0]] = map[k][1](v)
+  }
+  return row
+}
+
+const toAgent = (row: any): Agent => ({ id: row.id, name: row.name, keyHint: row.key_hint, createdAt: row.created_at })
+
+export class ProxyStore {
+  constructor (private readonly db: Knex) {}
+
+  async createAgent (agent: Agent, keyHash: string, rules: Rules = DEFAULT_RULES): Promise<void> {
+    await this.db.transaction(async trx => {
+      await trx('agents').insert({ id: agent.id, name: agent.name, key_hash: keyHash, key_hint: agent.keyHint, created_at: agent.createdAt })
+      await trx('rules').insert({ agent_id: agent.id, ...rulesRow(rules) })
+    })
+  }
+
+  async findAgentByKeyHash (keyHash: string): Promise<Agent | undefined> {
+    const row = await this.db('agents').where({ key_hash: keyHash }).first()
+    return row === undefined ? undefined : toAgent(row)
+  }
+
+  async getAgent (id: string): Promise<Agent | undefined> {
+    const row = await this.db('agents').where({ id }).first()
+    return row === undefined ? undefined : toAgent(row)
+  }
+
+  async listAgents (): Promise<Agent[]> {
+    return (await this.db('agents').orderBy('created_at', 'asc')).map(toAgent)
+  }
+
+  async getRules (agentId: string): Promise<Rules> {
+    const row = await this.db('rules').where({ agent_id: agentId }).first()
+    if (row === undefined) return DEFAULT_RULES
+    return {
+      allowedHosts: JSON.parse(row.allowed_hosts),
+      maxPerPaymentSats: row.max_per_payment_sats,
+      dailyBudgetSats: row.daily_budget_sats,
+      approvalThresholdSats: row.approval_threshold_sats
+    }
+  }
+
+  async setRules (agentId: string, rules: Rules): Promise<void> {
+    await this.db('rules').insert({ agent_id: agentId, ...rulesRow(rules) }).onConflict('agent_id').merge()
+  }
+
+  async insertRequest (r: PaymentRequestRecord): Promise<PaymentRequestRecord> {
+    await this.db('requests').insert(toRow(r))
+    return r
+  }
+
+  async updateRequest (id: string, patch: Partial<PaymentRequestRecord>): Promise<PaymentRequestRecord> {
+    await this.db('requests').where({ id }).update(toRow(patch))
+    return (await this.getRequest(id))!
+  }
+
+  async getRequest (id: string): Promise<PaymentRequestRecord | undefined> {
+    const row = await this.db('requests').where({ id }).first()
+    return row === undefined ? undefined : toRecord(row)
+  }
+
+  async listRequests (filter: { status?: RequestStatus[] } = {}): Promise<Array<PaymentRequestRecord & { agentName: string }>> {
+    const q = this.db('requests').join('agents', 'agents.id', 'requests.agent_id').select('requests.*', 'agents.name as agent_name')
+    if (filter.status !== undefined) q.whereIn('requests.status', filter.status)
+    const rows = await q.orderBy('requests.created_at', 'desc').limit(500)
+    return rows.map(row => ({ ...toRecord(row), agentName: row.agent_name }))
+  }
+
+  /** Satoshis that left the wallet for this agent since `sinceMs`. */
+  async spentSince (agentId: string, sinceMs: number): Promise<number> {
+    const row = await this.db('requests')
+      .where({ agent_id: agentId }).whereIn('status', SPENT_STATUSES).where('paid_at', '>=', sinceMs)
+      .sum({ total: 'price_sats' }).first()
+    return Number(row?.total ?? 0)
+  }
+
+  /** Marks pending and approved requests that waited too long as expired. */
+  async expireStale (nowMs: number, ttl: { pendingMs: number, approvedMs: number }): Promise<void> {
+    await this.db('requests').where({ status: 'pending' }).where('created_at', '<', nowMs - ttl.pendingMs)
+      .update({ status: 'expired', reason: 'no decision in time', decided_at: nowMs, decided_by: 'system' })
+    await this.db('requests').where({ status: 'approved' }).where('decided_at', '<', nowMs - ttl.approvedMs)
+      .update({ status: 'expired', reason: 'approved but not executed in time', decided_by: 'system' })
+  }
+}
+
+function rulesRow (rules: Rules): Record<string, unknown> {
+  return {
+    allowed_hosts: JSON.stringify(rules.allowedHosts),
+    max_per_payment_sats: rules.maxPerPaymentSats,
+    daily_budget_sats: rules.dailyBudgetSats,
+    approval_threshold_sats: rules.approvalThresholdSats
+  }
+}
