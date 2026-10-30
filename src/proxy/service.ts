@@ -11,7 +11,7 @@
 import { randomBytes } from 'node:crypto'
 import type { VaultService, SignRequest, FinalizedPayment } from '../vault/service.js'
 import { ProxyError } from './errors.js'
-import { callMerchant, preflight, type MerchantCall } from './merchant.js'
+import { callMerchant, preflight, type MerchantCall } from '../shared/merchant.js'
 import type { Notifier } from './notifier.js'
 import { dayStart, evaluate, hostAllowed, type Rules } from './rules.js'
 import type { Agent, MerchantAnswer, PaymentRequestRecord, ProxyStore } from './store.js'
@@ -71,7 +71,7 @@ export class SpendControl {
   async requestPayment (agent: Agent, input: PayInput): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
       if (await this.vault.inFlight(agent.id) !== undefined) {
-        throw new ProxyError(409, 'a vault payment is already waiting for a signature')
+        throw new ProxyError(409, 'a vault payment is already waiting for a signature', { code: 'SIGNATURE_PENDING' })
       }
       const now = this.now()
       const rules = await this.store.getRules(agent.id)
@@ -139,7 +139,7 @@ export class SpendControl {
         throw new ProxyError(409, `request is ${record.status}${record.reason !== null ? `: ${record.reason}` : ''}`)
       }
       if (await this.vault.inFlight(agent.id) !== undefined) {
-        throw new ProxyError(409, 'a vault payment is already waiting for a signature')
+        throw new ProxyError(409, 'a vault payment is already waiting for a signature', { code: 'SIGNATURE_PENDING' })
       }
       const call = callOf(record)
       // The approval may be hours old and BRC-121 payments are only valid for 30 s: ask the price again.

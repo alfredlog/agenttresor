@@ -15,6 +15,7 @@ npm test               # offline, on wallet-toolbox's mock chain
 npm run typecheck
 npm run merchant       # demo merchant on MERCHANT_PORT (default 5080)
 npm run proxy          # spend-control proxy + dashboard on PROXY_PORT (default 5050)
+npm run mcp:http       # the agent's MCP server over HTTP on MCP_PORT (default 5070)
 ```
 
 ## How a payment works (non-custodial vault)
@@ -40,6 +41,51 @@ output 0 = the merchant's BRC-29 output, output 1 = change back to the vault. Th
 signature, broadcasts through Arcade and delivers the request to the merchant with the BRC-121 payment headers.
 The signature must come back within 20 s (merchants accept a payment for 30 s).
 
+## The AI agent (MCP server)
+
+`src/mcp/` is an MCP server that an AI agent (Claude Desktop, Claude Code…) uses to pay for services. It holds
+the agent's own signing key: on first start it creates `mcp-data/agent-key.json` (mode 0600, gitignored) and
+registers the public key with the proxy. The company then funds the agent's vault on `/vault.html`.
+
+Tools: `list_services`, `check_budget`, `get_price`, `pay_and_fetch {url, method?, body?, purpose, maxSats}` and
+`check_request {requestId}`. For each payment the agent asks the merchant's price itself, refuses above `maxSats`,
+and signs the vault transaction only if output 0 pays exactly that price (`src/agent/pay.ts`). A payment above the
+approval threshold comes back `pending` with a request id; once the company approves it, `check_request` pays it.
+
+Settings come from the environment or the project's `.env`: `PROXY_URL`, `AGENT_API_KEY` (the `agt_…` key from
+`POST /admin/agents`), `MERCHANT_URLS`, `MCP_DATA_DIR`; for HTTP also `MCP_TOKEN`, `MCP_PORT`, `MCP_HOST`.
+
+**Claude Desktop** (`claude_desktop_config.json`, stdio). Use `--silent`: on stdio, stdout belongs to the protocol.
+Claude Desktop may not see your shell's `PATH`; if `npm` is not found, give its absolute path (`which npm`).
+
+```json
+{
+  "mcpServers": {
+    "agenttresor": {
+      "command": "npm",
+      "args": ["--prefix", "/absolute/path/to/agenttresor", "run", "--silent", "mcp"],
+      "env": {
+        "PROXY_URL": "http://localhost:5050",
+        "AGENT_API_KEY": "agt_…",
+        "MERCHANT_URLS": "http://localhost:5080"
+      }
+    }
+  }
+}
+```
+
+**Claude Code**, stdio:
+
+```bash
+claude mcp add agenttresor -e PROXY_URL=http://localhost:5050 -e AGENT_API_KEY=agt_… -e MERCHANT_URLS=http://localhost:5080 -- npm --prefix /absolute/path/to/agenttresor run --silent mcp
+```
+
+or over HTTP, with `npm run mcp:http` running and `MCP_TOKEN` set:
+
+```bash
+claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "Authorization: Bearer <MCP_TOKEN>"
+```
+
 ## Layout
 
 - `src/shared/bsv.ts`, `src/shared/brc121.ts` — the single (CJS) runtime build of `@bsv/sdk` and `@bsv/402-pay`; import
@@ -56,7 +102,10 @@ The signature must come back within 20 s (merchants accept a payment for 30 s).
   (Bearer `ADMIN_TOKEN`); dashboard at `/`, vault page at `/vault.html`
 - `src/company/vault-client.ts` — `fundVault` / `reclaimVault` against any BRC-100 wallet; `vault-page.ts` is the
   browser script of `public/vault.html`, bundled by `npm run build:web` into `public/vault.js`
-- `src/agent/vault-signer.ts` — checks a payment before the agent signs it
+- `src/agent/` — the agent side: `keys.ts` (its own key, `agent-key.json`), `proxy-client.ts`, `pay.ts` (price check,
+  sign, retry once), `vault-signer.ts` (checks a payment before signing it)
+- `src/mcp/` — the agent's MCP server: `server.ts` (tools), `http.ts` (Streamable HTTP + Bearer token), `main.ts`
+- `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
 - `test/helpers/` — offline mock chain, test wallets and a proxy harness
 
 See `docs/BSV_STACK_COMPLETE_GUIDE.md` and `AGENTS.md` before writing BSV code.
