@@ -9,11 +9,12 @@ import express, { type Express } from 'express'
 import { P2PKH, PrivateKey, Transaction, UnlockingScript, Utils } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../src/agent/vault-signer'
-import { approveAndFund, getApproval, reclaimRequestVault } from '../src/company/vault-client'
+import { approveAndFund, confirmedFingerprint, getApproval, reclaimRequestVault } from '../src/company/vault-client'
 import { createMerchantApp, ROOM_RATES_SATS } from '../src/merchant/app'
 import { createPaymentMiddleware } from '../src/shared/brc121'
 import { vaultLockingScript } from '../src/vault/script'
-import { ADMIN_TOKEN, createProxyHarness, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
+import { fingerprint } from '../src/shared/fingerprint'
+import { ADMIN_TOKEN, createProxyHarness, fp, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
 
 let h: ProxyHarness
 let merchantWallet: Wallet, shopWallet: Wallet
@@ -76,7 +77,12 @@ describe('approval = funding', () => {
     expect(approval.feeSats).toBeGreaterThan(0)
     expect(approval.totalSats).toBe(approval.priceSats + approval.feeSats)
 
-    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    // Approve-and-fund also needs the confirmed fingerprint.
+    await expect(approveAndFund(h.company, h.url, ADMIN_TOKEN, id, confirmedFingerprint(fp(agent), false))).rejects.toThrow(/confirm it before funding/)
+    await expect(approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fingerprint(PrivateKey.fromRandom().toPublicKey().toString()))).rejects.toThrow(/agent key changed/)
+    expect((await requestOf(agent, id)).status).toBe('pending')
+
+    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     expect(funded.satoshis).toBe(approval.totalSats)
     expect(await requestOf(agent, id)).toMatchObject({ status: 'approved', decidedBy: 'company' })
     expect(await requestVault(id)).toMatchObject({ status: 'open', requestStatus: 'approved', reclaimable: false, satoshis: approval.totalSats })
@@ -133,7 +139,7 @@ describe('when an approved payment cannot happen, the company reclaims', () => {
     const agent = await h.createAgent('price-bot', rules(), 5_000)
     shopState.price = 3_000
     const id = (await h.pay(agent, { url: `${shop}/item`, purpose: 'Widget' })).body.requestId
-    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
 
     shopState.price = 2_900 // cheaper, but not what the company approved
     const shopBefore = await spendableSats(shopWallet)
@@ -155,7 +161,7 @@ describe('when an approved payment cannot happen, the company reclaims', () => {
   it('the daily budget still applies at execute time', async () => {
     const agent = await h.createAgent('budget-bot', rules({ dailyBudgetSats: 2_400 }), 5_000)
     const id = (await h.pay(agent, hotel())).body.requestId // 2000, fits the budget now
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     expect((await h.payAndSign(agent, { url: `${merchant}/api/report`, purpose: 'Report' }, 500)).status).toBe(200) // 500 spent meanwhile
 
     const exec = await execute(agent, id)
@@ -167,7 +173,7 @@ describe('when an approved payment cannot happen, the company reclaims', () => {
   it('an approval not executed in time expires and becomes reclaimable', async () => {
     const agent = await h.createAgent('slow-bot', rules(), 5_000)
     const id = (await h.pay(agent, hotel())).body.requestId
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     h.clock.offset = 25 * 3600_000
     try {
       expect(await requestVault(id)).toMatchObject({ status: 'open', requestStatus: 'expired', reclaimable: true })
@@ -181,7 +187,7 @@ describe('when an approved payment cannot happen, the company reclaims', () => {
   it('reclaiming a still-approved request withdraws the approval', async () => {
     const agent = await h.createAgent('withdrawn-bot', rules(), 5_000)
     const id = (await h.pay(agent, hotel())).body.requestId
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     await reclaimRequestVault(h.company, h.url, ADMIN_TOKEN, id)
     expect(await requestOf(agent, id)).toMatchObject({ status: 'failed', reason: expect.stringMatching(/reclaimed/) })
     expect((await execute(agent, id)).status).toBe(409)

@@ -4,11 +4,14 @@
  * wallet-toolbox wallet. The company's key never leaves its wallet.
  *
  *  - fundVault: lock `sats` in this agent's vault script (agent AND policy, or company alone).
+ *    Funding needs the agent key fingerprint a human confirmed on the agent's machine:
+ *    it is recomputed here from the key about to be funded, never taken from the proxy.
  *  - approveAndFund: approve one payment above the threshold by funding a request
  *    vault (same script) with exactly its price + fee. Without it the payment is impossible.
  *  - reclaimVault / reclaimRequestVault: take a vault back with the company signature alone.
  */
 import { LockingScript, Signature, Transaction, Utils, type WalletInterface, type WalletProtocol } from '../shared/bsv.js'
+import { isFingerprint, requireConfirmedFingerprint } from '../shared/fingerprint.js'
 import { parseVaultScript, reclaimUnlockingScript, RECLAIM_UNLOCK_LENGTH, vaultLockingScript, vaultSighash } from '../vault/script.js'
 
 export interface ProxyAdmin {
@@ -27,17 +30,43 @@ async function proxyCall<T> (admin: ProxyAdmin, path: string, body?: unknown): P
   return json
 }
 
+export interface VaultParams {
+  agentId: string
+  agentPub: string
+  policyPub: string
+  protocolID: WalletProtocol
+  keyID: string
+}
+
+/** The keys of an agent's vault, before funding (the page computes the fingerprint from agentPub). */
+export async function getVaultParams (proxyUrl: string, adminToken: string, agentId: string): Promise<VaultParams> {
+  return await proxyCall<VaultParams>({ proxyUrl, adminToken }, `/admin/vaults/${encodeURIComponent(agentId)}/params`)
+}
+
+/**
+ * What the vault page passes to fundVault / approveAndFund: the fingerprint it
+ * showed (computed in the browser from agentPub), only if the human ticked
+ * "I checked this fingerprint on the agent's machine". Otherwise null, which
+ * the funding functions refuse.
+ */
+export function confirmedFingerprint (shown: string | null, checked: boolean): string | null {
+  return checked && isFingerprint(shown) ? shown : null
+}
+
 export interface FundResult {
   txid: string
   vout: number
   satoshis: number
 }
 
-export async function fundVault (wallet: WalletInterface, proxyUrl: string, adminToken: string, agentId: string, sats: number): Promise<FundResult> {
+export async function fundVault (
+  wallet: WalletInterface, proxyUrl: string, adminToken: string, agentId: string, sats: number, confirmedFingerprint: string | null
+): Promise<FundResult> {
   if (!Number.isSafeInteger(sats) || sats < 1) throw new Error('amount must be a positive number of satoshis')
   const admin = { proxyUrl, adminToken }
   const id = encodeURIComponent(agentId)
-  const params = await proxyCall<{ agentPub: string, policyPub: string, protocolID: WalletProtocol, keyID: string }>(admin, `/admin/vaults/${id}/params`)
+  const params = await getVaultParams(proxyUrl, adminToken, agentId)
+  requireConfirmedFingerprint(params.agentPub, confirmedFingerprint)
   const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: params.protocolID, keyID: params.keyID, counterparty: 'self' })
   const lockingScript = vaultLockingScript({ agentPub: params.agentPub, policyPub: params.policyPub, companyPub }).toHex()
 
@@ -80,10 +109,13 @@ export async function getApproval (proxyUrl: string, adminToken: string, request
  * Approves a payment above the threshold by funding it: one output of exactly
  * price + fee, locked by the agent's vault script, reserved for this request.
  */
-export async function approveAndFund (wallet: WalletInterface, proxyUrl: string, adminToken: string, requestId: string): Promise<FundResult> {
+export async function approveAndFund (
+  wallet: WalletInterface, proxyUrl: string, adminToken: string, requestId: string, confirmedFingerprint: string | null
+): Promise<FundResult> {
   const admin = { proxyUrl, adminToken }
   const id = encodeURIComponent(requestId)
   const a = await getApproval(proxyUrl, adminToken, requestId)
+  requireConfirmedFingerprint(a.agentPub, confirmedFingerprint)
   const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: a.protocolID, keyID: a.keyID, counterparty: 'self' })
   const lockingScript = vaultLockingScript({ agentPub: a.agentPub, policyPub: a.policyPub, companyPub }).toHex()
 

@@ -16,11 +16,13 @@
     h2 { font-size: 15px; margin: 28px 0 10px; }
     .muted { color: var(--muted); }
     .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 16px 0; }
-    input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); min-width: 260px; }
+    input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); min-width: 0; width: 100%; }
+    .bar input { width: auto; min-width: 260px; }
     button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
     button.approve, a.approve { border-color: var(--ok); color: var(--ok); }
     a.approve { display: inline-block; font: inherit; padding: 6px 12px; border: 1px solid var(--ok); border-radius: 6px; text-decoration: none; }
     button.deny { border-color: var(--bad); color: var(--bad); }
+    button.primary { border-color: var(--accent); color: var(--accent); }
     .table { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -33,17 +35,75 @@
     .status-paid_not_delivered { color: var(--warn); }
     a { color: var(--accent); }
     #error { color: var(--bad); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-top: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+    .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+    .rules { font-size: 12px; line-height: 1.6; }
+    .fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; letter-spacing: .02em; }
+    #key-box { border-color: var(--warn); }
+    #key-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .warn { color: var(--warn); font-weight: 600; }
+    .hint { font-size: 13px; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
 <main>
   <h1>AgentTresor</h1>
-  <div class="muted">Spend control for AI agents. Approve or deny payments above the threshold; every payment is in the ledger. <a href="vault.html">Fund or reclaim vaults</a></div>
+  <div class="muted">Spend control for AI agents. Create agents and set their rules, approve or deny payments above the threshold; every payment is in the ledger. <a href="vault.html">Fund or reclaim vaults</a></div>
 
   <div class="bar">
     <input id="token" type="password" placeholder="Admin token" autocomplete="off">
     <button id="save">Use token</button>
     <span id="error"></span>
+  </div>
+
+  <h2>Agents</h2>
+  <div class="table"><table>
+    <thead><tr><th>Agent</th><th>API key</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
+    <tbody id="agents"><tr><td colspan="6" class="muted">Enter the admin token.</td></tr></tbody>
+  </table></div>
+
+  <!-- The new API key is shown here once, never stored, and removed from the page on Close. -->
+  <div id="key-box" class="card" hidden>
+    <div><strong>API key for <span id="key-agent"></span></strong></div>
+    <div class="actions">
+      <input id="key-value" readonly aria-label="New agent API key">
+      <button id="key-copy" class="primary">Copy</button>
+      <button id="key-close">Close</button>
+    </div>
+    <p class="warn">Copy it now into the agent's .env (AGENT_API_KEY). It will never be shown again.</p>
+    <p class="hint muted">Next step: on the agent's own machine, run <code>npm run mcp</code>. It creates the agent's signing key, registers it with the proxy and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same.</p>
+  </div>
+
+  <div id="rules-box" class="card" hidden>
+    <div><strong>Rules for <span id="rules-agent"></span></strong></div>
+    <form id="rules-form" class="grid" style="margin-top:12px">
+      <label>Allowed hosts (comma-separated) <input name="allowedHosts" placeholder="api.example.com, localhost:5080"></label>
+      <label>Max per payment (sats) <input name="maxPerPaymentSats" type="number" min="0" step="1" required></label>
+      <label>Daily budget (sats) <input name="dailyBudgetSats" type="number" min="0" step="1" required></label>
+      <label>Approval threshold (sats) <input name="approvalThresholdSats" type="number" min="0" step="1" required></label>
+    </form>
+    <div class="actions">
+      <button id="rules-save" class="primary">Save rules</button>
+      <button id="rules-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div><strong>New agent</strong></div>
+    <form id="new-agent" class="grid" style="margin-top:12px">
+      <label>Name <input name="name" required maxlength="100" placeholder="travel-bot"></label>
+      <label>Allowed hosts (comma-separated) <input name="allowedHosts" placeholder="api.example.com, localhost:5080"></label>
+      <label>Max per payment (sats) <input name="maxPerPaymentSats" type="number" min="0" step="1" value="10000" required></label>
+      <label>Daily budget (sats) <input name="dailyBudgetSats" type="number" min="0" step="1" value="50000" required></label>
+      <label>Approval threshold (sats) <input name="approvalThresholdSats" type="number" min="0" step="1" value="1000" required></label>
+    </form>
+    <div class="actions">
+      <button id="create" class="primary">Create agent</button>
+      <span class="muted hint">Payments above the threshold need your approval: you fund each one from your wallet.</span>
+    </div>
   </div>
 
   <h2>Pending approvals</h2>
@@ -58,8 +118,12 @@
     <tbody id="ledger"></tbody>
   </table></div>
 </main>
-<script>
-  // The token lives in sessionStorage only, so it is gone when the tab closes.
+<script type="module">
+  // Built by `npm run build:web` from src/shared/fingerprint.ts (the agent and vault.html use the same function).
+  import { fingerprint } from './fingerprint.js'
+
+  // The admin token lives in sessionStorage only, so it is gone when the tab closes.
+  // Agent API keys are never stored anywhere in the browser.
   const store = {
     get () { try { return sessionStorage.getItem('adminToken') || '' } catch { return '' } },
     set (v) { try { sessionStorage.setItem('adminToken', v) } catch {} }
@@ -67,6 +131,8 @@
   const $ = id => document.getElementById(id)
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
   const time = v => v ? new Date(v).toLocaleString() : ''
+  const fpOf = pub => { if (!pub) return ''; try { return fingerprint(pub) } catch { return '?' } }
+  const VAULT_STATUS = { no_key: 'agent key not registered', awaiting_funding: 'awaiting funding', open: 'open', closed: 'closed' }
 
   async function api (path, init = {}) {
     const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${store.get()}`, ...(init.headers || {}) } })
@@ -75,10 +141,39 @@
     return body
   }
 
+  /** Rules from a form; the proxy validates them again. */
+  function rulesFrom (form) {
+    const f = new FormData(form)
+    const sats = name => Number(f.get(name))
+    return {
+      allowedHosts: String(f.get('allowedHosts') || '').split(',').map(h => h.trim()).filter(h => h !== ''),
+      maxPerPaymentSats: sats('maxPerPaymentSats'),
+      dailyBudgetSats: sats('dailyBudgetSats'),
+      approvalThresholdSats: sats('approvalThresholdSats')
+    }
+  }
+
+  let agents = []
+
+  function renderAgents () {
+    $('agents').innerHTML = agents.length === 0
+      ? '<tr><td colspan="6" class="muted">No agents yet: create one below.</td></tr>'
+      : agents.map(a => `<tr>
+          <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span></td>
+          <td class="mono">${esc(a.key)}</td>
+          <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
+          <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
+            max ${esc(a.rules.maxPerPaymentSats)} · daily ${esc(a.rules.dailyBudgetSats)} · approval above ${esc(a.rules.approvalThresholdSats)} sats</td>
+          <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}</td>
+          <td><button data-edit="${esc(a.id)}">Edit rules</button></td></tr>`).join('')
+  }
+
   async function refresh () {
     if (!store.get()) return
     try {
-      const [{ requests }, ledger] = await Promise.all([api('/admin/requests?status=pending'), api('/admin/ledger')])
+      const [{ agents: list }, { requests }, ledger] = await Promise.all([api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger')])
+      agents = list
+      renderAgents()
       $('error').textContent = ''
       $('pending').innerHTML = requests.length === 0
         ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
@@ -100,6 +195,84 @@
     }
   }
 
+  // ── New agent: the key is shown once, then removed from the page ────────
+  function closeKeyBox () {
+    $('key-value').value = ''
+    $('key-agent').textContent = ''
+    $('key-box').hidden = true
+  }
+
+  $('create').addEventListener('click', async ev => {
+    const btn = ev.currentTarget // currentTarget is null once the handler awaits
+    const form = $('new-agent')
+    if (!form.reportValidity()) return
+    const name = String(new FormData(form).get('name')).trim()
+    btn.disabled = true
+    try {
+      const created = await api('/admin/agents', { method: 'POST', body: JSON.stringify({ name, rules: rulesFrom(form) }) })
+      $('key-agent').textContent = `${created.name} (${created.id})`
+      $('key-value').value = created.apiKey
+      $('key-box').hidden = false
+      $('key-value').select()
+      form.reset()
+    } catch (err) {
+      $('error').textContent = err.message
+    } finally {
+      btn.disabled = false
+    }
+    await refresh()
+  })
+
+  $('key-copy').addEventListener('click', async () => {
+    const input = $('key-value')
+    try {
+      await navigator.clipboard.writeText(input.value)
+      $('key-copy').textContent = 'Copied'
+    } catch {
+      input.select() // no clipboard access (e.g. plain http): the key is selected for Ctrl/Cmd+C
+    }
+    setTimeout(() => { $('key-copy').textContent = 'Copy' }, 1500)
+  })
+  $('key-close').addEventListener('click', closeKeyBox)
+
+  // ── Edit rules ──────────────────────────────────────────────────────────
+  let editing = null
+
+  $('agents').addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-edit]')
+    if (!btn) return
+    const agent = agents.find(a => a.id === btn.dataset.edit)
+    if (!agent) return
+    editing = agent.id
+    const form = $('rules-form')
+    form.elements.allowedHosts.value = agent.rules.allowedHosts.join(', ')
+    form.elements.maxPerPaymentSats.value = agent.rules.maxPerPaymentSats
+    form.elements.dailyBudgetSats.value = agent.rules.dailyBudgetSats
+    form.elements.approvalThresholdSats.value = agent.rules.approvalThresholdSats
+    $('rules-agent').textContent = `${agent.name} (${agent.id})`
+    $('rules-box').hidden = false
+    $('rules-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  })
+
+  $('rules-save').addEventListener('click', async ev => {
+    const btn = ev.currentTarget // currentTarget is null once the handler awaits
+    const form = $('rules-form')
+    if (editing === null || !form.reportValidity()) return
+    btn.disabled = true
+    try {
+      await api(`/admin/agents/${encodeURIComponent(editing)}/rules`, { method: 'PUT', body: JSON.stringify(rulesFrom(form)) })
+      $('rules-box').hidden = true
+      editing = null
+    } catch (err) {
+      $('error').textContent = err.message
+    } finally {
+      btn.disabled = false
+    }
+    await refresh()
+  })
+  $('rules-cancel').addEventListener('click', () => { $('rules-box').hidden = true; editing = null })
+
+  // ── Pending approvals: deny here; approving means funding (vault.html) ──
   $('pending').addEventListener('click', async ev => {
     const btn = ev.target.closest('button[data-action]')
     if (!btn) return

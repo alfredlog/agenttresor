@@ -36,8 +36,13 @@ OP_ENDIF
 
 ## How a payment works
 
-The agent registers its public key (`POST /v1/vault/agent-key`), the company funds the agent's vault on
-`/vault.html`, then the agent calls `POST /v1/pay`. The proxy reads the merchant's BRC-121 price from an unpaid
+The company creates the agent on the dashboard (`/`: name and rules; the `agt_…` API key is shown once, for the
+agent's `.env`). The agent runs `npm run mcp` on its own machine: it creates its signing key, registers the public key
+(`POST /v1/vault/agent-key`) and prints `Agent key fingerprint: XXXX-XXXX-XXXX`. The company funds the agent's vault
+on `/vault.html` only after checking that the fingerprint shown there, computed in the browser from the registered
+key, is the same as on the agent's machine (`src/shared/fingerprint.ts`: first 6 bytes of sha256 of the compressed
+key). Funding and approve-and-fund stay disabled until that is confirmed, and refuse a key that changed since. Then
+the agent calls `POST /v1/pay`. The proxy reads the merchant's BRC-121 price from an unpaid
 preflight and applies the rules. Three outcomes:
 
 - **Under the approval threshold**: paid from the **agent's vault**. The proxy answers `{ status: 'sign', unsignedTx, … }`
@@ -67,8 +72,9 @@ mind) is listed under *Approved payments* on `/vault.html` and reclaimed by the 
 the agent's own signing key: on first start it creates `mcp-data/agent-key.json` (mode 0600, gitignored) and
 registers the public key with the proxy. The company then funds the agent's vault on `/vault.html`.
 
-Tools: `list_services`, `check_budget`, `get_price`, `pay_and_fetch {url, method?, body?, purpose, maxSats}` and
-`check_request {requestId}`. For each payment the agent asks the merchant's price itself, refuses above `maxSats`,
+Tools: `list_services`, `check_budget`, `get_price`, `pay_and_fetch {url, method?, body?, purpose, maxSats}`,
+`check_request {requestId}` and `show_agent_key` (the key fingerprint the company checks before funding; the server
+also prints it to stderr on start). For each payment the agent asks the merchant's price itself, refuses above `maxSats`,
 and signs the vault transaction only if output 0 pays exactly that price (`src/agent/pay.ts`). A payment above the
 approval threshold comes back `pending` with a request id; once the company approves it, `check_request` pays it.
 
@@ -127,6 +133,8 @@ claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "
   sign, retry once), `vault-signer.ts` (checks a payment before signing it)
 - `src/mcp/` — the agent's MCP server: `server.ts` (tools), `http.ts` (Streamable HTTP + Bearer token), `main.ts`
 - `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
+- `src/shared/fingerprint.ts` — agent key fingerprint, shared by the agent, the dashboard (`public/fingerprint.js`)
+  and the vault page
 - `test/helpers/` — offline mock chain, test wallets and a proxy harness
 
 See `docs/BSV_STACK_COMPLETE_GUIDE.md` and `AGENTS.md` before writing BSV code.

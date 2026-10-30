@@ -4,6 +4,7 @@
  * company's rules, builds the vault payment the agent signs, and keeps the ledger.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import express, { type Express } from 'express'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { createPaymentMiddleware } from '../src/shared/brc121'
@@ -11,7 +12,7 @@ import { approveAndFund, reclaimRequestVault } from '../src/company/vault-client
 import { createMerchantApp, ROOM_RATES_SATS } from '../src/merchant/app'
 import type { Notifier } from '../src/proxy/notifier'
 import type { PaymentRequestRecord } from '../src/proxy/store'
-import { ADMIN_TOKEN, createProxyHarness, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
+import { ADMIN_TOKEN, createProxyHarness, fp, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
 
 let h: ProxyHarness
 let merchantWallet: Wallet, flakyWallet: Wallet
@@ -98,7 +99,7 @@ describe('spend-control proxy', () => {
 
     // A plain approval is refused: approving means funding.
     expect((await h.admin(`/admin/requests/${id}/approve`, { method: 'POST' })).status).toBe(400)
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     expect((await h.call(`/v1/requests/${id}`, agent.key)).body).toMatchObject({ status: 'approved', decidedBy: 'company' })
     expect(notifier.decisions.map(r => r.id)).toContain(id)
 
@@ -129,7 +130,7 @@ describe('spend-control proxy', () => {
     const res = await h.pay(agent, { url: `${flaky}/item`, purpose: 'Widget' })
     expect(res.status).toBe(202)
     const id = res.body.requestId
-    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    const funded = await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     flakyState.price = 1_800
     const [vaultBefore, flakyBefore] = [(await h.call('/v1/budget', agent.key)).body.vault, await spendableSats(flakyWallet)]
     const exec = await h.call(`/v1/requests/${id}/execute`, agent.key, { method: 'POST' })
@@ -212,12 +213,32 @@ describe('authentication', () => {
     expect((await h.call(`/v1/requests/${id}/sign`, a.key, { method: 'POST', body: { signature: '00' } })).status).toBe(404)
   })
 
-  it('returns the key once and masks it afterwards', async () => {
-    const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'masked-bot' } })
+  it('returns the key once; the agents list never contains a key or its hash', async () => {
+    const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'masked-bot', rules: { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 } } })
+    expect(created.status).toBe(201)
     expect(created.body.apiKey).toMatch(/^agt_[0-9a-f]{64}$/)
-    const listed = (await h.admin('/admin/agents')).body.agents.find((x: any) => x.id === created.body.id)
-    expect(listed.key).toBe(`${created.body.apiKey.slice(0, 8)}…`)
-    expect(JSON.stringify((await h.admin('/admin/agents')).body)).not.toContain(created.body.apiKey)
+    const apiKey: string = created.body.apiKey
+    const hash = createHash('sha256').update(apiKey).digest('hex')
+
+    const list = await h.admin('/admin/agents')
+    const text = JSON.stringify(list.body)
+    expect(text).not.toContain(apiKey)
+    expect(text).not.toContain(apiKey.slice(4)) // not even without its prefix
+    expect(text).not.toContain(hash)
+    expect(text).not.toMatch(/apiKey|key_hash|keyHash/)
+    const listed = list.body.agents.find((x: any) => x.id === created.body.id)
+    expect(listed).toEqual({
+      id: created.body.id,
+      name: 'masked-bot',
+      key: `${apiKey.slice(0, 8)}…`,
+      createdAt: expect.any(String),
+      rules: { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 },
+      vault: { status: 'no_key', satoshis: 0, agentPub: null }
+    })
+    // An agent with a funded vault shows its status, balance and public signing key.
+    const funded = await h.createAgent('listed-bot', { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 }, 3_000)
+    const listedFunded = (await h.admin('/admin/agents')).body.agents.find((x: any) => x.id === funded.id)
+    expect(listedFunded.vault).toEqual({ status: 'open', satoshis: 3_000, agentPub: funded.signer.toPublicKey().toString() })
   })
 
   it('refuses admin routes without the admin token (401)', async () => {

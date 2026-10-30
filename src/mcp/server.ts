@@ -8,6 +8,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { getPrice, type AgentPayer, type PayResult } from '../agent/pay.js'
 import type { ProxyClient } from '../agent/proxy-client.js'
+import { fingerprint } from '../shared/fingerprint.js'
 
 export const SERVER_INSTRUCTIONS = [
   'AgentTresor pays online services (HTTP 402, paid in BSV) from a budget your company controls.',
@@ -25,6 +26,8 @@ export interface AgentToolsOptions {
   client: ProxyClient
   /** Merchant base URLs whose catalogs list_services reads. */
   merchantUrls: string[]
+  /** The agent's public signing key (its private key never leaves agent-key.json). */
+  agentPublicKey: string
   version?: string
 }
 
@@ -78,6 +81,16 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
   const server = new McpServer({ name: 'agenttresor-agent', version: opts.version ?? '0.1.0' }, { instructions: SERVER_INSTRUCTIONS })
   const safe = (fn: () => Promise<ToolResult>): Promise<ToolResult> =>
     fn().catch(err => reply(`Error: ${err instanceof Error ? err.message : String(err)}`, undefined, true))
+
+  server.registerTool('show_agent_key', {
+    title: 'Show agent key',
+    description: 'Shows this agent\'s public signing key and its fingerprint (XXXX-XXXX-XXXX). ' +
+      'The company compares the fingerprint with the one on its vault page before funding this agent; give it to the user when asked.',
+    annotations: { readOnlyHint: true }
+  }, async () => await safe(async () => {
+    const fp = fingerprint(opts.agentPublicKey)
+    return reply(`Agent key fingerprint: ${fp}. The company must see the same fingerprint on its vault page before funding.`, { fingerprint: fp, publicKey: opts.agentPublicKey })
+  }))
 
   server.registerTool('list_services', {
     title: 'List paid services',

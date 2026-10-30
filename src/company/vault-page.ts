@@ -5,7 +5,8 @@
  *   vault.html?approve=R-…  opens the approval of that request.
  */
 import { WalletClient } from '../shared/bsv.js'
-import { approveAndFund, fundVault, getApproval, reclaimRequestVault, reclaimVault } from './vault-client.js'
+import { fingerprint } from '../shared/fingerprint.js'
+import { approveAndFund, confirmedFingerprint, fundVault, getApproval, getVaultParams, reclaimRequestVault, reclaimVault } from './vault-client.js'
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T
 const esc = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -82,6 +83,36 @@ async function refreshRequestVaults (): Promise<void> {
   }
 }
 
+// ── Agent key fingerprint: computed HERE from agentPub, never taken from the proxy ──
+// Funding stays disabled until the human ticks "I checked this fingerprint on the agent's machine".
+
+let fundShown: string | null = null
+let approveShown: string | null = null
+
+function updateButtons (): void {
+  $<HTMLButtonElement>('fund').disabled = confirmedFingerprint(fundShown, $<HTMLInputElement>('fund-confirm').checked) === null
+  $<HTMLButtonElement>('approve').disabled = confirmedFingerprint(approveShown, $<HTMLInputElement>('approve-confirm').checked) === null
+}
+
+async function loadFundFingerprint (): Promise<void> {
+  const { proxyUrl, adminToken, agentId } = settings()
+  fundShown = null
+  $<HTMLInputElement>('fund-confirm').checked = false
+  $<HTMLInputElement>('fund-confirm').disabled = true
+  updateButtons()
+  if (adminToken === '' || agentId === '') return
+  try {
+    const params = await getVaultParams(proxyUrl, adminToken, agentId)
+    if (params.agentId !== agentId || $<HTMLInputElement>('agent').value.trim() !== agentId) return // answer for an older input
+    fundShown = fingerprint(params.agentPub)
+    $('fund-fp-text').innerHTML = `Agent key fingerprint of <span class="mono">${esc(agentId)}</span>: <span class="fp">${esc(fundShown)}</span>`
+    $<HTMLInputElement>('fund-confirm').disabled = false
+  } catch (err) {
+    $('fund-fp-text').textContent = `${agentId}: ${(err as Error).message}`
+  }
+  updateButtons()
+}
+
 const approveId = new URLSearchParams(location.search).get('approve')
 
 async function loadApproval (): Promise<void> {
@@ -100,12 +131,19 @@ async function loadApproval (): Promise<void> {
       <dt>Price</dt><dd>${esc(a.priceSats)} sats</dd>
       <dt>Network fee</dt><dd>${esc(a.feeSats)} sats</dd>
       <dt>You fund</dt><dd class="total">${esc(a.totalSats)} sats</dd></dl>`
+    approveShown = fingerprint(a.agentPub)
+    $('approve-fp').textContent = approveShown
+    $<HTMLInputElement>('approve-confirm').checked = false
+    $('approve-fp-box').hidden = false
     $('approve').hidden = false
   } catch (err) {
+    approveShown = null
     $('approval-details').className = 'muted'
     $('approval-details').textContent = (err as Error).message
+    $('approve-fp-box').hidden = true
     $('approve').hidden = true
   }
+  updateButtons()
 }
 
 async function refreshAll (): Promise<void> {
@@ -115,6 +153,7 @@ async function refreshAll (): Promise<void> {
 async function run (button: HTMLButtonElement, task: () => Promise<void>): Promise<void> {
   button.disabled = true
   try { await task() } catch (err) { log(esc((err as Error).message), 'error') } finally { button.disabled = false }
+  updateButtons()
   await refreshAll()
 }
 
@@ -125,7 +164,8 @@ $<HTMLButtonElement>('fund').addEventListener('click', ev => {
     const { proxyUrl, adminToken, agentId } = settings()
     const sats = Number($<HTMLInputElement>('amount').value)
     log(`Funding ${esc(agentId)} with ${esc(sats)} sats: approve in BSV Desktop…`)
-    const r = await fundVault(wallet, proxyUrl, adminToken, agentId, sats)
+    // fundVault recomputes the fingerprint from the key it is about to fund and refuses any other.
+    const r = await fundVault(wallet, proxyUrl, adminToken, agentId, sats, confirmedFingerprint(fundShown, $<HTMLInputElement>('fund-confirm').checked))
     log(`Vault of ${esc(agentId)} funded with ${esc(r.satoshis)} sats: ${txLink(r.txid)}`, 'ok')
   })
 })
@@ -144,9 +184,10 @@ $<HTMLButtonElement>('approve').addEventListener('click', ev => {
   void run(ev.currentTarget as HTMLButtonElement, async () => {
     const { proxyUrl, adminToken } = settings()
     log(`Approving ${esc(approveId)}: approve the funding in BSV Desktop…`)
-    const r = await approveAndFund(wallet, proxyUrl, adminToken, approveId!)
+    const r = await approveAndFund(wallet, proxyUrl, adminToken, approveId!, confirmedFingerprint(approveShown, $<HTMLInputElement>('approve-confirm').checked))
     log(`Payment ${esc(approveId)} approved and funded with ${esc(r.satoshis)} sats: ${txLink(r.txid)}`, 'ok')
     $('approve').hidden = true
+    $('approve-fp-box').hidden = true
     $('approval-details').insertAdjacentHTML('beforeend', `<p>Approved. The agent can now execute it: ${txLink(r.txid)}</p>`)
   })
 })
@@ -166,10 +207,23 @@ $('request-vaults').addEventListener('click', ev => {
 
 $('vaults').addEventListener('click', ev => {
   const row = (ev.target as HTMLElement).closest('tr[data-agent]')
-  if (row !== null) $<HTMLInputElement>('agent').value = row.getAttribute('data-agent') ?? ''
+  if (row === null) return
+  $<HTMLInputElement>('agent').value = row.getAttribute('data-agent') ?? ''
+  void loadFundFingerprint()
 })
+$<HTMLInputElement>('agent').addEventListener('input', () => {
+  // A new agent ID invalidates the fingerprint shown and its confirmation at once.
+  fundShown = null
+  $<HTMLInputElement>('fund-confirm').checked = false
+  $<HTMLInputElement>('fund-confirm').disabled = true
+  $('fund-fp-text').textContent = 'Loading the agent key fingerprint…'
+  updateButtons()
+})
+$<HTMLInputElement>('agent').addEventListener('change', () => { void loadFundFingerprint() })
+$<HTMLInputElement>('fund-confirm').addEventListener('change', updateButtons)
+$<HTMLInputElement>('approve-confirm').addEventListener('change', updateButtons)
 $<HTMLButtonElement>('refresh').addEventListener('click', () => { void refreshAll() })
-$<HTMLInputElement>('token').addEventListener('change', () => { void refreshAll(); void loadApproval() })
+$<HTMLInputElement>('token').addEventListener('change', () => { void refreshAll(); void loadApproval(); void loadFundFingerprint() })
 
 $<HTMLInputElement>('proxy').value = session.get('proxyUrl') !== '' ? session.get('proxyUrl') : location.origin
 $<HTMLInputElement>('token').value = session.get('adminToken')

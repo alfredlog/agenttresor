@@ -10,6 +10,7 @@ import { PrivateKey } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../../src/agent/vault-signer'
 import { fundVault } from '../../src/company/vault-client'
+import { fingerprint } from '../../src/shared/fingerprint'
 import { createProxyApp } from '../../src/proxy/app'
 import { DashboardNotifier, type Notifier } from '../../src/proxy/notifier'
 import { openProxyDb } from '../../src/proxy/store'
@@ -94,7 +95,7 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     const agent: TestAgent = { id: created.body.id, key: created.body.apiKey, signer: PrivateKey.fromRandom() }
     const reg = await call('/v1/vault/agent-key', agent.key, { method: 'POST', body: { publicKey: agent.signer.toPublicKey().toString() } })
     if (reg.status !== 200) throw new Error(`agent key not registered: ${JSON.stringify(reg.body)}`)
-    if (vaultSats > 0) await fundVault(company, url, ADMIN_TOKEN, agent.id, vaultSats)
+    if (vaultSats > 0) await fundVault(company, url, ADMIN_TOKEN, agent.id, vaultSats, fp(agent))
     return agent
   }
 
@@ -119,6 +120,9 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     }
   }
 }
+
+/** The agent key fingerprint, as a human reads it on the agent's machine and confirms before funding. */
+export const fp = (agent: TestAgent): string => fingerprint(agent.signer.toPublicKey().toString())
 
 export const spendableSats = async (w: Wallet): Promise<number> =>
   (await w.listOutputs({ basket: 'default', limit: 1000 })).outputs.filter(o => o.spendable).reduce((s, o) => s + o.satoshis, 0)

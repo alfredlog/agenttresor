@@ -8,12 +8,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../src/agent/vault-signer'
-import { approveAndFund, fundVault, reclaimVault } from '../src/company/vault-client'
+import { approveAndFund, confirmedFingerprint, fundVault, reclaimVault } from '../src/company/vault-client'
+import { fingerprint } from '../src/shared/fingerprint'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
 import { PolicyKeys } from '../src/vault/keys'
 import { vaultLockingScript, signVaultInput, checksigBytes, SPEND_UNLOCK_LENGTH } from '../src/vault/script'
 import { VAULT_PROTOCOL, vaultKeyId } from '../src/vault/protocol'
-import { ADMIN_TOKEN, createProxyHarness, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
+import { ADMIN_TOKEN, createProxyHarness, fp, spendableSats, type ProxyHarness, type TestAgent } from './helpers/proxy'
 
 let h: ProxyHarness
 let merchantWallet: Wallet
@@ -36,7 +37,7 @@ describe('funding', () => {
   it('the company funds a vault from its wallet; the proxy verifies and opens it', async () => {
     const agent = await h.createAgent('funded-bot', rules())
     const before = await spendableSats(h.company)
-    const funded = await fundVault(h.company, h.url, ADMIN_TOKEN, agent.id, 50_000)
+    const funded = await fundVault(h.company, h.url, ADMIN_TOKEN, agent.id, 50_000, fp(agent))
     expect(funded.txid).toMatch(/^[0-9a-f]{64}$/)
     expect((await budget(agent)).vault).toEqual({ status: 'open', satoshis: 50_000, outpoint: `${funded.txid}.${funded.vout}` })
     expect(await spendableSats(h.company)).toBeLessThan(before - 50_000)
@@ -61,6 +62,29 @@ describe('funding', () => {
     expect(res.status).toBe(400)
     expect(res.body.error).toMatch(/not this agent's vault script/)
     expect((await budget(agent)).vault.status).toBe('awaiting_funding')
+  })
+
+  it('funds only the agent key whose fingerprint a human confirmed', async () => {
+    const agent = await h.createAgent('fingerprint-bot', rules())
+    const fund = async (confirmed: string | null): Promise<unknown> => await fundVault(h.company, h.url, ADMIN_TOKEN, agent.id, 10_000, confirmed)
+    const before = await spendableSats(h.company)
+
+    // Box not ticked: the page passes null.
+    await expect(fund(confirmedFingerprint(fp(agent), false))).rejects.toThrow(/confirm it before funding/)
+    // Another key's fingerprint.
+    await expect(fund(fingerprint(PrivateKey.fromRandom().toPublicKey().toString()))).rejects.toThrow(/agent key changed/)
+    // The key is swapped after the human checked it (e.g. by a compromised proxy).
+    const confirmed = confirmedFingerprint(fp(agent), true)
+    const swapped = PrivateKey.fromRandom()
+    expect((await h.call('/v1/vault/agent-key', agent.key, { method: 'POST', body: { publicKey: swapped.toPublicKey().toString() } })).status).toBe(200)
+    await expect(fund(confirmed)).rejects.toThrow(/agent key changed/)
+    expect(await spendableSats(h.company)).toBe(before) // nothing was funded
+    expect((await budget(agent)).vault.status).toBe('awaiting_funding')
+
+    // The genuine key back, confirmed: funded.
+    await h.call('/v1/vault/agent-key', agent.key, { method: 'POST', body: { publicKey: agent.signer.toPublicKey().toString() } })
+    await fund(confirmed)
+    expect((await budget(agent)).vault).toMatchObject({ status: 'open', satoshis: 10_000 })
   })
 
   it('cannot fund before the agent registered its key', async () => {
@@ -117,7 +141,7 @@ describe('paying from the vault', () => {
     const res = await h.pay(agent, { url: `${merchant}/api/hotel/book`, method: 'POST', body: { roomType: 'standard', nights: 1 }, purpose: 'Hotel' })
     expect(res.status).toBe(202)
     const id = res.body.requestId
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, fp(agent))
     const exec = await h.call(`/v1/requests/${id}/execute`, agent.key, { method: 'POST' })
     expect(exec.status).toBe(200)
     expect(exec.body).toMatchObject({ status: 'sign', requestId: id, merchantOutput: { satoshis: ROOM_RATES_SATS.standard } })

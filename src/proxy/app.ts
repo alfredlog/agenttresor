@@ -188,12 +188,25 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     res.status(201).json({ id: agent.id, name: agent.name, apiKey, key: maskAgentKey(agent.keyHint), rules })
   }))
 
+  // Never the API key or its hash: only the masked hint. agentPub is the agent's public signing key
+  // (the dashboard shows its fingerprint).
   admin.get('/agents', wrap(async (_req, res) => {
     const agents = await store.listAgents()
+    const vaults = new Map((await vault.listVaults()).map(v => [v.agentId, v]))
     res.json({
-      agents: await Promise.all(agents.map(async a => ({
-        id: a.id, name: a.name, key: maskAgentKey(a.keyHint), createdAt: iso(a.createdAt), rules: await store.getRules(a.id)
-      })))
+      agents: await Promise.all(agents.map(async a => {
+        const v = vaults.get(a.id)
+        return {
+          id: a.id,
+          name: a.name,
+          key: maskAgentKey(a.keyHint),
+          createdAt: iso(a.createdAt),
+          rules: await store.getRules(a.id),
+          vault: v === undefined
+            ? { status: 'no_key', satoshis: 0, agentPub: null }
+            : { status: v.status, satoshis: v.status === 'open' ? v.satoshis : 0, agentPub: v.agentPub }
+        }
+      }))
     })
   }))
 

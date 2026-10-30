@@ -19,6 +19,7 @@ import { AGENT_KEY_FILE, loadOrCreateAgentKey, registerAgentKey } from '../src/a
 import { AgentPayer } from '../src/agent/pay'
 import { ProxyClient } from '../src/agent/proxy-client'
 import { approveAndFund, fundVault } from '../src/company/vault-client'
+import { fingerprint } from '../src/shared/fingerprint'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
 import { createMcpHttpApp } from '../src/mcp/http'
 import { createAgentMcpServer } from '../src/mcp/server'
@@ -34,6 +35,9 @@ interface McpAgent {
   id: string
   client: ProxyClient
   payer: AgentPayer
+  publicKey: string
+  /** The agent key's fingerprint, as the MCP agent prints it on start. */
+  fingerprint: string
   /** Every proxy path the agent called, in order. */
   calls: string[]
   /** Set to alter the proxy's /v1/pay answers (a malicious or buggy proxy). */
@@ -56,7 +60,9 @@ async function startAgent (name: string, vaultSats: number): Promise<McpAgent> {
   agent.client = new ProxyClient({ proxyUrl: h.url, apiKey: created.body.apiKey, fetch: observed })
   const key = await loadOrCreateAgentKey(join(dataRoot, agent.id))
   await registerAgentKey(agent.client, key.publicKey)
-  if (vaultSats > 0) await fundVault(h.company, h.url, ADMIN_TOKEN, agent.id, vaultSats)
+  agent.publicKey = key.publicKey
+  agent.fingerprint = fingerprint(key.publicKey)
+  if (vaultSats > 0) await fundVault(h.company, h.url, ADMIN_TOKEN, agent.id, vaultSats, agent.fingerprint)
   agent.payer = new AgentPayer({ client: agent.client, key: key.key })
   agent.vault = async () => (await agent.client.budget()).body.vault
   agent.calls.length = 0
@@ -95,7 +101,7 @@ describe('agent key', () => {
     expect(await registerAgentKey(client, restart.publicKey)).toBe('registered') // same key, still unfunded
 
     // Once the vault is funded, a restart with the same key is fine…
-    await fundVault(h.company, h.url, ADMIN_TOKEN, created.body.id, 5_000)
+    await fundVault(h.company, h.url, ADMIN_TOKEN, created.body.id, 5_000, fingerprint(first.publicKey))
     expect(await registerAgentKey(client, (await loadOrCreateAgentKey(dir)).publicKey)).toBe('already_open')
     expect((await h.admin(`/admin/vaults`)).body.vaults.find((v: any) => v.agentId === created.body.id).status).toBe('open')
     // …a different key stops the agent with a clear error.
@@ -155,7 +161,7 @@ describe('paying', () => {
     const id = (r as any).requestId
 
     expect(await agent.payer.checkRequest(id)).toMatchObject({ status: 'pending', requestId: id })
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, id, agent.fingerprint)
 
     const [before, vaultBefore] = [await spendableSats(merchantWallet), await agent.vault()]
     agent.calls.length = 0
@@ -197,14 +203,15 @@ describe('MCP server', () => {
 
   it('lists the tools over an in-memory transport and pays end to end with pay_and_fetch', async () => {
     const agent = await startAgent('mcp-bot', 20_000)
-    const server = createAgentMcpServer({ payer: agent.payer, client: agent.client, merchantUrls: [merchant] })
+    const server = createAgentMcpServer({ payer: agent.payer, client: agent.client, merchantUrls: [merchant], agentPublicKey: agent.publicKey })
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
     await server.connect(serverSide)
     const mcp = new Client({ name: 'test-model', version: '1.0.0' })
     await mcp.connect(clientSide)
 
     const { tools } = await mcp.listTools()
-    expect(tools.map(t => t.name).sort()).toEqual(['check_budget', 'check_request', 'get_price', 'list_services', 'pay_and_fetch'])
+    expect(tools.map(t => t.name).sort()).toEqual(['check_budget', 'check_request', 'get_price', 'list_services', 'pay_and_fetch', 'show_agent_key'])
+    expect(textOf(await mcp.callTool({ name: 'show_agent_key', arguments: {} }))).toMatch(new RegExp(`^Agent key fingerprint: ${agent.fingerprint}\\.`))
     expect(tools.find(t => t.name === 'pay_and_fetch')!.inputSchema.required).toEqual(expect.arrayContaining(['url', 'purpose', 'maxSats']))
     expect(mcp.getInstructions()).toMatch(/check_budget and get_price/)
 
@@ -223,7 +230,7 @@ describe('MCP server', () => {
     expect(textOf(pending)).toMatch(/^Waiting for approval: request R-[0-9A-F]{10} \(2000 sats\).*funding it from its wallet/)
     const requestId = /request (R-[0-9A-F]{10})/.exec(textOf(pending))![1]
     expect(textOf(await mcp.callTool({ name: 'check_request', arguments: { requestId } }))).toMatch(/^Waiting for approval/)
-    await approveAndFund(h.company, h.url, ADMIN_TOKEN, requestId)
+    await approveAndFund(h.company, h.url, ADMIN_TOKEN, requestId, agent.fingerprint)
     const vaultBefore = await agent.vault()
     const approvedPaid = await mcp.callTool({ name: 'check_request', arguments: { requestId } })
     expect(approvedPaid.isError).toBe(false)
@@ -245,7 +252,7 @@ describe('MCP server', () => {
 
     beforeAll(async () => {
       const agent = await startAgent('http-bot', 5_000)
-      const app = createMcpHttpApp({ createServer: () => createAgentMcpServer({ payer: agent.payer, client: agent.client, merchantUrls: [merchant] }), token: TOKEN })
+      const app = createMcpHttpApp({ createServer: () => createAgentMcpServer({ payer: agent.payer, client: agent.client, merchantUrls: [merchant], agentPublicKey: agent.publicKey }), token: TOKEN })
       await new Promise<void>(resolve => { server = app.listen(0, '127.0.0.1', () => { resolve() }) })
       url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`
     })
@@ -261,7 +268,7 @@ describe('MCP server', () => {
     it('serves the tools with the token', async () => {
       const mcp = new Client({ name: 'test-model', version: '1.0.0' })
       await mcp.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } } }))
-      expect((await mcp.listTools()).tools).toHaveLength(5)
+      expect((await mcp.listTools()).tools).toHaveLength(6)
       await mcp.close()
     })
 

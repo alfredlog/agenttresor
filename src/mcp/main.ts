@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { loadOrCreateAgentKey, registerAgentKey } from '../agent/keys.js'
+import { fingerprint } from '../shared/fingerprint.js'
 import { AgentPayer } from '../agent/pay.js'
 import { ProxyClient } from '../agent/proxy-client.js'
 import { createMcpHttpApp } from './http.js'
@@ -35,11 +36,13 @@ const client = new ProxyClient({ proxyUrl: required('PROXY_URL'), apiKey: requir
 
 const agentKey = await loadOrCreateAgentKey(dataDir)
 log(`${agentKey.created ? 'created' : 'loaded'} agent key ${agentKey.publicKey.slice(0, 16)}… (${agentKey.path})`)
+// stderr only: on stdio, stdout belongs to the MCP protocol. The company checks this before funding.
+log(`Agent key fingerprint: ${fingerprint(agentKey.publicKey)}`)
 const registration = await registerAgentKey(client, agentKey.publicKey)
 log(registration === 'registered' ? 'agent key registered with the proxy; the company can now fund the vault' : 'vault already open with this agent key')
 
 const payer = new AgentPayer({ client, key: agentKey.key })
-const createServer = () => createAgentMcpServer({ payer, client, merchantUrls })
+const createServer = () => createAgentMcpServer({ payer, client, merchantUrls, agentPublicKey: agentKey.publicKey })
 
 if (process.argv.includes('--http')) {
   const host = process.env.MCP_HOST ?? '127.0.0.1'

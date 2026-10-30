@@ -44,6 +44,10 @@
     #approval .total { font-weight: 600; }
     button.ok { border-color: var(--ok); color: var(--ok); }
     [hidden] { display: none !important; }
+    .fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 16px; font-weight: 600; letter-spacing: .04em; }
+    .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--fg); margin-top: 10px; }
+    .check input { width: auto; }
+    .fp-box { margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -55,8 +59,12 @@
     <h2>Approve a payment</h2>
     <div id="approval" class="card">
       <div id="approval-details" class="muted">Enter the admin token to load the request.</div>
+      <div id="approve-fp-box" class="fp-box" hidden>
+        Agent key fingerprint (computed here from the agent's public key): <span id="approve-fp" class="fp"></span>
+        <label class="check"><input type="checkbox" id="approve-confirm"> I checked this fingerprint on the agent's machine</label>
+      </div>
       <div class="actions">
-        <button id="approve" class="ok" hidden>Approve and fund with BSV Desktop</button>
+        <button id="approve" class="ok" hidden disabled>Approve and fund with BSV Desktop</button>
       </div>
       <div class="muted" style="margin-top:10px">Approving funds this one payment from your wallet: price plus network fee, locked so that only
         this agent and the policy together can spend it, or you alone can take it back. Nothing is paid until the agent executes it.</div>
@@ -71,8 +79,13 @@
       <label>Agent ID <input id="agent" placeholder="A-1234ABCD" autocomplete="off"></label>
       <label>Amount (sats) <input id="amount" type="number" min="1" step="1" value="10000"></label>
     </div>
+    <div class="fp-box">
+      <div id="fund-fp-text" class="muted">Enter an agent ID (or pick one below) to see its key fingerprint.</div>
+      <label class="check"><input type="checkbox" id="fund-confirm" disabled> I checked this fingerprint on the agent's machine</label>
+      <div class="muted" style="font-size:12px;margin-top:6px">The agent prints it on start (<code>Agent key fingerprint: XXXX-XXXX-XXXX</code>) and shows it with its <code>show_agent_key</code> tool. If it differs, do not fund.</div>
+    </div>
     <div class="actions">
-      <button id="fund" class="primary">Fund vault</button>
+      <button id="fund" class="primary" disabled>Fund vault</button>
       <button id="reclaim">Reclaim vault</button>
     </div>
   </div>
