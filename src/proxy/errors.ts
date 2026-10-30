@@ -1,5 +1,5 @@
 /** Machine-readable reasons a client may act on. */
-export type ProxyErrorCode = 'VAULT_OPEN' | 'SIGN_WINDOW_EXPIRED' | 'SIGNATURE_PENDING'
+export type ProxyErrorCode = 'VAULT_OPEN' | 'SIGN_WINDOW_EXPIRED' | 'SIGNATURE_PENDING' | 'FUNDS_LOCKED' | 'AGENT_DISABLED'
 
 /**
  * An error that maps to an HTTP status. The message and `details` are safe to

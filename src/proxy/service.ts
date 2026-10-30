@@ -18,10 +18,11 @@ import type { RequestVault } from '../vault/store.js'
 import type { Knex } from 'knex'
 import type { AuditLog } from '../audit/log.js'
 import { ProxyError } from './errors.js'
+import { generateAgentKey, hashAgentKey } from './keys.js'
 import { callMerchant, preflight, type MerchantCall } from '../shared/merchant.js'
 import type { Notifier } from './notifier.js'
 import { dayStart, evaluate, hostAllowed, type Rules } from './rules.js'
-import type { Agent, MerchantAnswer, PaymentRequestRecord, ProxyStore } from './store.js'
+import type { Agent, AgentStatus, MerchantAnswer, PaymentRequestRecord, ProxyStore } from './store.js'
 
 export { ProxyError }
 
@@ -80,6 +81,7 @@ export class SpendControl {
   /** POST /v1/pay */
   async requestPayment (agent: Agent, input: PayInput): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
+      await this.assertActive(agent.id)
       if (await this.vault.inFlight(agent.id) !== undefined) {
         throw new ProxyError(409, 'a vault payment is already waiting for a signature', { code: 'SIGNATURE_PENDING' })
       }
@@ -163,6 +165,7 @@ export class SpendControl {
    */
   async execute (agent: Agent, id: string): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
+      await this.assertActive(agent.id)
       const record = await this.getOwnRequest(agent, id)
       if (record.status !== 'approved') {
         throw new ProxyError(409, `request is ${record.status}${record.reason !== null ? `: ${record.reason}` : ''}`)
@@ -244,6 +247,7 @@ export class SpendControl {
   /** POST /v1/requests/:id/sign: complete, broadcast and deliver the payment the agent signed. */
   async sign (agent: Agent, id: string, signature: unknown): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
+      await this.assertActive(agent.id)
       const record = await this.getOwnRequest(agent, id)
       if (record.status !== 'approved') throw new ProxyError(409, `request is ${record.status}`)
       // Recorded with the payment itself, before delivery: a crash below still leaves it in the ledger.
@@ -254,6 +258,53 @@ export class SpendControl {
       })
       return await this.deliver(record, payment)
     })
+  }
+
+  /**
+   * POST /admin/agents/:id/disable and DELETE /admin/agents/:id. Runs under
+   * the agent's lock, so none of its payments is half-way, and in one
+   * transaction: the API key and unused connection codes are revoked, its
+   * pending and approved requests are denied (an approved request's funds
+   * become reclaimable), and the change is audited. Deleting is refused while
+   * company money is still locked for the agent. Nothing is erased: requests,
+   * ledger and audit entries stay.
+   */
+  async retireAgent (agentId: string, to: Exclude<AgentStatus, 'active'>): Promise<{ agent: Agent, deniedRequests: string[] }> {
+    return await this.withAgentLock(agentId, async () => {
+      const result = await this.inTransaction(async (store, audit) => {
+        const agent = await store.getAgent(agentId)
+        if (agent === undefined || agent.status === 'deleted') throw new ProxyError(404, 'agent not found')
+        if (agent.status === to) throw new ProxyError(409, `agent is already ${to}`)
+        if (to === 'deleted') {
+          const locked = await store.lockedFunds(agentId)
+          if (locked.vaultOpen || locked.openRequestVaults.length > 0) {
+            throw new ProxyError(409, 'reclaim its vault first: company funds are still locked for this agent', { code: 'FUNDS_LOCKED', ...locked })
+          }
+        }
+        const now = this.now()
+        // A fresh random hash no one knows: the agent's key stops working at once.
+        await store.replaceAgentKey(agentId, hashAgentKey(generateAgentKey()), '')
+        const connectCodesRevoked = await store.dropConnectCodes(agentId)
+        const reason = `agent ${to}`
+        const denied: PaymentRequestRecord[] = []
+        for (const r of await store.openRequests(agentId)) {
+          denied.push(await store.updateRequest(r.id, { status: 'denied', reason, decidedAt: now, decidedBy: 'admin' }))
+          await audit.append('admin', 'request.decided', { requestId: r.id, agentId, decision: 'denied', reason, was: r.status })
+        }
+        await store.setAgentStatus(agentId, to, now)
+        await audit.append('admin', to === 'disabled' ? 'agent.disabled' : 'agent.deleted', {
+          agentId, name: agent.name, was: agent.status, keyRevoked: agent.keyHint !== '', connectCodesRevoked, deniedRequests: denied.map(r => r.id)
+        })
+        return { agent: { ...agent, keyHint: '', status: to }, denied }
+      })
+      for (const d of result.denied) await this.notify(n => n.decided(d))
+      return { agent: result.agent, deniedRequests: result.denied.map(d => d.id) }
+    })
+  }
+
+  /** Checked inside the agent's lock: a disable that ran while this request waited for the lock still counts. */
+  private async assertActive (agentId: string): Promise<void> {
+    if ((await this.store.getAgent(agentId))?.status !== 'active') throw new ProxyError(403, 'agent disabled', { code: 'AGENT_DISABLED' })
   }
 
   async getOwnRequest (agent: Agent, id: string): Promise<PaymentRequestRecord> {

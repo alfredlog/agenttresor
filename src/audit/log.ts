@@ -21,6 +21,7 @@ export type AuditActor = 'rules' | 'admin' | 'company' | `agent:${string}`
 
 export type AuditType =
   | 'agent.created' | 'agent.rules_changed' | 'agent.key_registered' | 'agent.connect_code_issued' | 'agent.connected'
+  | 'agent.disabled' | 'agent.enabled' | 'agent.deleted'
   | 'request.created' | 'request.decided' | 'request.paid' | 'request.paid_not_delivered' | 'request.failed' | 'request.expired'
   | 'vault.funded' | 'vault.payment' | 'vault.reclaimed'
   | 'request_vault.funded' | 'request_vault.reclaimed'
