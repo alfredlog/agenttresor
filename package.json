@@ -15,7 +15,8 @@
     "audit:verify": "tsx src/audit/verify-cli.ts",
     "build:web": "node scripts/build-web.mjs",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "overlay": "tsx src/token/overlay/server.ts"
   },
   "dependencies": {
     "@bsv/402-pay": "0.3.3",

@@ -5,7 +5,7 @@
  * endpoints: POST /submit (x-topics: ["tm_tokenkit"]) and POST /lookup
  * (service "ls_tokenkit").
  *
- * Env: PORT (8080), OVERLAY_DB (./data/overlay.db), NETWORK (main|test),
+ * Env: OVERLAY_PORT (8080), OVERLAY_DB (./data/overlay.db), BSV_NETWORK (main|test),
  *      OVERLAY_PRIVATE_KEY (hex; generated and saved to ./data/overlay.key if absent),
  *      TOKEN_WHITELIST (comma-separated token ids; empty = all tokens),
  *      CHAINTRACKS_URL (block headers for SPV; default Arcade https://arcade-v2-us-1.bsvblockchain.tech),
@@ -85,11 +85,11 @@ function loadOrCreateKey (file: string): string {
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT ?? 8080)
+  const port = Number(process.env.OVERLAY_PORT ?? 8080)
   const overlay = await startOverlay({
     port,
     dbFile: process.env.OVERLAY_DB ?? './data/overlay.db',
-    network: (process.env.NETWORK as 'main' | 'test' | undefined) ?? 'main',
+    network: (process.env.BSV_NETWORK as 'main' | 'test' | undefined) ?? 'main',
     privateKey: loadOrCreateKey('./data/overlay.key'),
     chainSource: process.env.CHAIN_TRACKER === 'woc' ? 'woc' : 'arcade',
     chaintracksUrl: process.env.CHAINTRACKS_URL,
