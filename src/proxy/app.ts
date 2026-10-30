@@ -187,9 +187,11 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
     const apiKey = generateAgentKey()
     const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: agentKeyHint(apiKey), createdAt: now() }
-    await store.createAgent(agent, hashAgentKey(apiKey), rules)
-    // The key itself is never logged, only its masked hint.
-    await audit.append('admin', 'agent.created', { agentId: agent.id, name: agent.name, keyHint: maskAgentKey(agent.keyHint), rules })
+    await store.transaction(async trx => {
+      await store.with(trx).createAgent(agent, hashAgentKey(apiKey), rules)
+      // The key itself is never logged, only its masked hint.
+      await audit.with(trx).append('admin', 'agent.created', { agentId: agent.id, name: agent.name, keyHint: maskAgentKey(agent.keyHint), rules })
+    })
     // The only time the key is ever returned.
     res.status(201).json({ id: agent.id, name: agent.name, apiKey, key: maskAgentKey(agent.keyHint), rules })
   }))
@@ -221,9 +223,12 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     if (agent === undefined) { res.status(404).json({ error: 'agent not found' }); return }
     const rules = parseRules(req.body)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
-    const before = await store.getRules(agent.id)
-    await store.setRules(agent.id, rules)
-    await audit.append('admin', 'agent.rules_changed', { agentId: agent.id, before, after: rules })
+    await store.transaction(async trx => {
+      const s = store.with(trx)
+      const before = await s.getRules(agent.id)
+      await s.setRules(agent.id, rules)
+      await audit.with(trx).append('admin', 'agent.rules_changed', { agentId: agent.id, before, after: rules })
+    })
     res.json({ id: agent.id, rules })
   }))
 
@@ -350,8 +355,9 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const anchorView = (a: { seq: number, hash: string, txid: string, at: number }): Record<string, unknown> =>
     ({ seq: a.seq, hash: a.hash, txid: a.txid, at: iso(a.at), explorerUrl: txLink(a.txid, network) })
 
+  // The head, how many entries no anchor covers yet, and whether the log got shorter than an anchor (deleted tail).
   admin.get('/audit/head', wrap(async (_req, res) => {
-    res.json(await audit.head())
+    res.json(await audit.status())
   }))
 
   // ?after=<seq>&limit=<n>: entries with seq > after, oldest first; without `after`, the last `limit` entries.
@@ -367,8 +373,10 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     })
   }))
 
-  admin.get('/audit/verify', wrap(async (_req, res) => {
-    const v = await audit.verify()
+  // Incremental by default (only entries after the last verified one); ?full=1 re-checks the whole chain.
+  admin.get('/audit/verify', wrap(async (req, res) => {
+    const full = req.query.full === '1' || req.query.full === 'true'
+    const v = await audit.verify({ full })
     res.json({ ...v, anchors: v.anchors.map(a => ({ ...anchorView(a), matches: a.matches })) })
   }))
 

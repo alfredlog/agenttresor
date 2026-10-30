@@ -49,6 +49,8 @@
     .chain-bad { color: var(--bad); font-weight: 600; }
     td.details { font-size: 12px; max-width: 420px; word-break: break-word; }
     #audit-msg.failed { color: var(--bad); }
+    .unanchored { color: var(--warn); font-weight: 600; }
+    #audit-alert { border: 1px solid var(--bad); color: var(--bad); background: var(--card); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-weight: 600; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -125,9 +127,12 @@
   <h2>Audit log</h2>
   <div class="muted hint">Every decision and payment, hash-chained: changing any past entry breaks the chain. Anchoring writes the
     current head hash on BSV from your wallet, so even a rewritten chain is caught.</div>
+  <div id="audit-alert" hidden></div>
   <div class="actions">
     <span id="audit-status" class="muted">Enter the admin token.</span>
+    <span id="audit-unanchored" class="unanchored"></span>
     <button id="anchor" class="primary" disabled>Anchor now with BSV Desktop</button>
+    <button id="verify-full">Verify full chain</button>
     <span id="audit-msg" class="muted"></span>
   </div>
   <div class="table" style="margin-top:12px"><table>
@@ -182,16 +187,30 @@
   const details = data => Object.entries(data ?? {})
     .map(([k, v]) => `${k}=${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`).join(' · ').slice(0, 220)
 
-  function renderAudit ({ entries, anchors }, check) {
-    const lastAnchor = anchors.at(-1)
+  /** Chain status line. The periodic refresh verifies incrementally; "Verify full chain" re-checks everything. */
+  function renderCheck (check) {
+    const lastAnchor = check.anchors.at(-1)
+    const scope = check.mode === 'full' ? 'full check' : `checked through #${check.verifiedThrough}`
     $('audit-status').className = check.ok ? 'chain-ok' : 'chain-bad'
     $('audit-status').textContent = check.ok
-      ? `Chain valid · ${check.entries} entries${lastAnchor ? ` · last anchored at #${lastAnchor.seq}` : ' · not anchored yet'}`
+      ? `Chain valid (${scope}) · ${check.entries} entries${lastAnchor ? ` · last anchored at #${lastAnchor.seq}` : ' · not anchored yet'}`
       : `Chain BROKEN at #${check.brokenAt}: ${check.reason}`
     if (check.ok && check.anchors.some(a => !a.matches)) {
       $('audit-status').className = 'chain-bad'
       $('audit-status').textContent = `Chain rewritten: anchor #${check.anchors.find(a => !a.matches).seq} no longer matches the log`
     }
+  }
+
+  function renderAudit ({ entries, anchors }, check, head) {
+    renderCheck(check)
+    // A log shorter than an anchor means its newest entries were deleted: nothing else can explain it.
+    $('audit-alert').hidden = !head.chainShorterThanAnchor
+    $('audit-alert').textContent = head.chainShorterThanAnchor
+      ? `Alert: the log ends at #${head.seq}, but an anchor on BSV covers #${head.latestAnchorSeq}. Its newest entries were deleted.`
+      : ''
+    $('audit-unanchored').textContent = head.unanchoredEntries > 0
+      ? `${head.unanchoredEntries} ${head.unanchoredEntries === 1 ? 'entry' : 'entries'} not anchored yet`
+      : ''
     // Stays disabled while an anchor is in progress, whatever the periodic refresh finds.
     $('anchor').disabled = anchoring || check.entries === 0
     $('audit').innerHTML = entries.length === 0
@@ -224,12 +243,13 @@
   async function refresh () {
     if (!store.get()) return
     try {
-      const [{ agents: list }, { requests }, ledger, audit, check] = await Promise.all([
-        api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'), api('/admin/audit/verify')
+      const [{ agents: list }, { requests }, ledger, audit, check, head] = await Promise.all([
+        api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'),
+        api('/admin/audit/verify'), api('/admin/audit/head')
       ])
       agents = list
       renderAgents()
-      renderAudit(audit, check)
+      renderAudit(audit, check, head)
       $('error').textContent = ''
       $('pending').innerHTML = requests.length === 0
         ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
@@ -364,6 +384,24 @@
       btn.disabled = false
     }
     await refresh()
+  })
+
+  $('verify-full').addEventListener('click', async ev => {
+    const btn = ev.currentTarget // currentTarget is null once the handler awaits
+    btn.disabled = true
+    $('audit-msg').className = 'muted'
+    $('audit-msg').textContent = 'Re-checking every entry…'
+    try {
+      const check = await api('/admin/audit/verify?full=1')
+      renderCheck(check)
+      $('audit-msg').className = check.ok && check.anchors.every(a => a.matches) ? 'muted' : 'failed'
+      $('audit-msg').textContent = `Full check: ${check.checked} entries re-hashed, ${check.ok ? 'chain valid' : `broken at #${check.brokenAt}`}.`
+    } catch (err) {
+      $('audit-msg').className = 'failed'
+      $('audit-msg').textContent = `Full check failed: ${err.message}`
+    } finally {
+      btn.disabled = false
+    }
   })
 
   $('save').addEventListener('click', () => { store.set($('token').value.trim()); $('token').value = ''; refresh() })
