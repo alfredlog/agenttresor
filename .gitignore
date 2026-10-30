@@ -7,5 +7,3 @@ dist/
 .DS_Store
 # Built by npm run build:web
 public/vault.js
-cardano/.env
-cardano/node_modules/
