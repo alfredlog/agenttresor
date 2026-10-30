@@ -1,8 +1,9 @@
 /**
  * Spend-control proxy HTTP API.
- *   Agents (Authorization: Bearer agt_…): /v1/pay, /v1/requests/:id, /v1/requests/:id/execute, /v1/budget
- *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/…
- *   Dashboard: / (public/index.html)
+ *   Agents (Authorization: Bearer agt_…): /v1/pay, /v1/requests/:id, /v1/requests/:id/execute,
+ *     /v1/requests/:id/sign, /v1/budget, /v1/vault/agent-key
+ *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults)
+ *   Dashboard: / (public/index.html); vault funding page: /vault.html
  * Keys and tokens are never logged.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -11,15 +12,24 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import type { Knex } from 'knex'
 import { getNetwork, txLink, type BsvNetwork } from '../shared/network.js'
 import { agentKeyHint, generateAgentKey, hashAgentKey, isAgentKey, maskAgentKey } from './keys.js'
+import type { ChainTracker, PrivateKey } from '../shared/bsv.js'
+import type { Broadcaster } from '../vault/broadcaster.js'
+import { PolicyKeys } from '../vault/keys.js'
+import { VaultService } from '../vault/service.js'
+import { VaultStore } from '../vault/store.js'
 import type { Notifier } from './notifier.js'
-import type { Payer } from './payer.js'
 import { DEFAULT_RULES, parseRules } from './rules.js'
 import { ProxyError, SpendControl, type Outcome } from './service.js'
 import { ProxyStore, REQUEST_STATUSES, SPENT_STATUSES, type Agent, type PaymentRequestRecord, type RequestStatus } from './store.js'
 
 export interface ProxyAppOptions {
   db: Knex
-  payer: Payer
+  /** PROXY_ROOT_KEY: derives the policy key of every vault and the proxy's identity (BRC-29 sender). */
+  policyRootKey: PrivateKey
+  /** Verifies vault funding transactions (SPV). */
+  chainTracker: ChainTracker
+  /** Broadcasts signed vault payments. */
+  broadcaster: Broadcaster
   notifier: Notifier
   adminToken: string
   now?: () => number
@@ -88,12 +98,20 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const network = opts.network ?? getNetwork()
   const now = opts.now ?? Date.now
   const store = new ProxyStore(opts.db)
-  const control = new SpendControl({ store, payer: opts.payer, notifier: opts.notifier, now })
+  const vault = new VaultService({
+    store: new VaultStore(opts.db),
+    policy: new PolicyKeys(opts.policyRootKey),
+    chainTracker: opts.chainTracker,
+    broadcaster: opts.broadcaster,
+    now
+  })
+  const control = new SpendControl({ store, vault, notifier: opts.notifier, now })
 
   const app = express()
   app.disable('x-powered-by')
   app.use(express.static(PUBLIC_DIR))
-  app.use(express.json({ limit: '100kb' }))
+  // Funding BEEFs carry the transaction's unconfirmed ancestry, so allow more than a plain request needs.
+  app.use(express.json({ limit: '2mb' }))
 
   const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
     (req: Request, res: Response, next: NextFunction) => { fn(req, res).catch(next) }
@@ -118,6 +136,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
 
   const sendOutcome = (res: Response, o: Outcome): void => {
     if (o.kind === 'free') { res.status(200).json({ status: 'free', satoshis: 0, response: o.answer }); return }
+    if (o.kind === 'sign') { res.status(200).json({ status: 'sign', requestId: o.record.id, ...o.sign }); return }
     res.status(o.httpStatus).json(outcomeBody(o))
   }
 
@@ -136,8 +155,20 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     sendOutcome(res, await control.execute(agentOf(res), String(req.params.id)))
   }))
 
+  app.post('/v1/requests/:id/sign', requireAgent, wrap(async (req, res) => {
+    const { signature } = (req.body ?? {}) as Record<string, unknown>
+    sendOutcome(res, await control.sign(agentOf(res), String(req.params.id), signature))
+  }))
+
   app.get('/v1/budget', requireAgent, wrap(async (_req, res) => {
     res.json(await control.budget(agentOf(res)))
+  }))
+
+  // The agent generates its own key pair and registers only the public key.
+  app.post('/v1/vault/agent-key', requireAgent, wrap(async (req, res) => {
+    const { publicKey } = (req.body ?? {}) as Record<string, unknown>
+    const v = await vault.registerAgentKey(agentOf(res).id, publicKey)
+    res.json({ agentId: v.agentId, agentPub: v.agentPub, status: v.status })
   }))
 
   // ── Admin API ──────────────────────────────────────────────────────────────
@@ -207,6 +238,46 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         explorerUrl: r.txid === null ? null : txLink(r.txid, network)
       }))
     })
+  }))
+
+  // ── Vaults (the company funds and reclaims them from its own wallet) ─────
+  const knownAgent = async (id: string): Promise<string> => {
+    if (await store.getAgent(id) === undefined) throw new ProxyError(404, 'agent not found')
+    return id
+  }
+
+  admin.get('/vaults', wrap(async (_req, res) => {
+    const vaults = await vault.listVaults()
+    res.json({
+      network,
+      vaults: vaults.map(v => ({
+        agentId: v.agentId,
+        agentName: v.agentName,
+        status: v.status,
+        satoshis: v.status === 'open' ? v.satoshis : 0,
+        outpoint: v.status === 'open' ? `${v.txid!}.${v.vout!}` : null,
+        explorerUrl: v.txid === null ? null : txLink(v.txid, network)
+      }))
+    })
+  }))
+
+  admin.get('/vaults/:agentId/params', wrap(async (req, res) => {
+    res.json(await vault.params(await knownAgent(String(req.params.agentId))))
+  }))
+
+  admin.post('/vaults/:agentId/funded', wrap(async (req, res) => {
+    const v = await vault.acceptFunding(await knownAgent(String(req.params.agentId)), (req.body ?? {}) as Record<string, unknown>)
+    res.json({ agentId: v.agentId, status: v.status, outpoint: `${v.txid!}.${v.vout!}`, satoshis: v.satoshis, explorerUrl: txLink(v.txid!, network) })
+  }))
+
+  admin.get('/vaults/:agentId/utxo', wrap(async (req, res) => {
+    res.json(await vault.utxo(await knownAgent(String(req.params.agentId))))
+  }))
+
+  admin.post('/vaults/:agentId/reclaimed', wrap(async (req, res) => {
+    const { txid } = (req.body ?? {}) as Record<string, unknown>
+    const v = await vault.markReclaimed(await knownAgent(String(req.params.agentId)), txid)
+    res.json({ agentId: v.agentId, status: v.status, explorerUrl: txLink(String(txid), network) })
   }))
 
   app.use('/admin', admin)

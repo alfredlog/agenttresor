@@ -89,6 +89,50 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
       await k.schema.dropTable('rules')
       await k.schema.dropTable('agents')
     }
+  },
+  '002_vaults': {
+    async up (k) {
+      // One vault per agent; the current UTXO and the BEEF that proves it.
+      await k.schema.createTable('vaults', t => {
+        t.string('agent_id').primary().references('agents.id')
+        t.string('agent_pub').notNullable()
+        t.string('company_pub')
+        t.text('locking_script')
+        t.string('status').notNullable()
+        t.string('txid')
+        t.integer('vout')
+        t.bigInteger('satoshis')
+        t.text('beef')
+        t.bigInteger('created_at').notNullable()
+        t.bigInteger('updated_at').notNullable()
+      })
+      // Every vault transaction: funding, payments (with the signing attempt), reclaim.
+      await k.schema.createTable('vault_txs', t => {
+        t.string('id').primary()
+        t.string('agent_id').notNullable().references('agents.id')
+        t.string('request_id')
+        t.string('kind').notNullable()
+        t.string('status').notNullable()
+        t.string('txid')
+        t.string('input_outpoint')
+        t.text('unsigned_tx')
+        t.bigInteger('price_sats')
+        t.bigInteger('fee_sats')
+        t.bigInteger('change_sats')
+        t.string('server_key')
+        t.string('nonce')
+        t.string('time_ms')
+        t.text('reason')
+        t.bigInteger('created_at').notNullable()
+        t.bigInteger('updated_at').notNullable()
+        t.index(['agent_id', 'status'])
+        t.index(['request_id'])
+      })
+    },
+    async down (k) {
+      await k.schema.dropTable('vault_txs')
+      await k.schema.dropTable('vaults')
+    }
   }
 }
 

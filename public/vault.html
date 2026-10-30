@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentTresor Vaults</title>
+  <style>
+    :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --card: #fff; --ok: #1f7a4d; --bad: #b3261e; --accent: #2b59c3; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --card: #1f1f1d; --ok: #5cc28f; --bad: #f08a80; --accent: #8fb0ff; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+    main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 28px 0 10px; }
+    .muted { color: var(--muted); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+    input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); width: 100%; }
+    .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+    button { font: inherit; padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
+    button.primary { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: .5; cursor: wait; }
+    .table { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { font-weight: 600; color: var(--muted); font-size: 12px; }
+    tr:last-child td { border-bottom: 0; }
+    tr[data-agent] { cursor: pointer; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    a { color: var(--accent); }
+    #log { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+    #log li { padding: 8px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; word-break: break-word; }
+    #log li.ok { border-color: var(--ok); }
+    #log li.error { border-color: var(--bad); color: var(--bad); }
+    .time { color: var(--muted); font-size: 12px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Agent vaults</h1>
+  <div class="muted">Fund an agent's vault from BSV Desktop, or take it back. Payments from a vault need the agent's and the policy's signatures; you can always reclaim alone. <a href="/">Dashboard</a></div>
+
+  <h2>Fund or reclaim</h2>
+  <div class="card">
+    <div class="grid">
+      <label>Proxy URL <input id="proxy" autocomplete="off"></label>
+      <label>Admin token <input id="token" type="password" autocomplete="off"></label>
+      <label>Agent ID <input id="agent" placeholder="A-1234ABCD" autocomplete="off"></label>
+      <label>Amount (sats) <input id="amount" type="number" min="1" step="1" value="10000"></label>
+    </div>
+    <div class="actions">
+      <button id="fund" class="primary">Fund vault</button>
+      <button id="reclaim">Reclaim vault</button>
+    </div>
+  </div>
+
+  <h2>Vaults <button id="refresh">Refresh</button></h2>
+  <div class="table"><table>
+    <thead><tr><th>Agent</th><th>Name</th><th>Status</th><th class="num">Sats</th><th>Last transaction</th></tr></thead>
+    <tbody id="vaults"><tr><td colspan="5" class="muted">Enter the admin token.</td></tr></tbody>
+  </table></div>
+
+  <h2>Activity</h2>
+  <ul id="log"></ul>
+</main>
+<script type="module" src="vault.js"></script>
+</body>
+</html>
