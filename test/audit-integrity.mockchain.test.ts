@@ -38,7 +38,7 @@ describe('a state change and its audit entry commit together', () => {
   let keyless: { id: string, apiKey: string }
   beforeAll(async () => {
     agent = await h.createAgent('atomic-bot', rules(), 10_000)
-    keyless = (await h.admin('/admin/agents', { method: 'POST', body: { name: 'keyless-bot' } })).body
+    keyless = await h.newAgent('keyless-bot')
     pendingId = (await h.pay(agent, { url: `${merchant}/api/hotel/book`, method: 'POST', body: { roomType: 'standard', nights: 1 }, purpose: 'Hotel' })).body.requestId
   })
 
@@ -122,7 +122,8 @@ describe('incremental verify', () => {
 
     await h.admin('/admin/agents', { method: 'POST', body: { name: 'incremental-bot' } })
     const inc = await verify()
-    expect(inc).toMatchObject({ ok: true, mode: 'incremental', checked: 1, verifiedThrough: full.entries + 1 })
+    // Creating an agent logs two entries: created, and its connection code issued.
+    expect(inc).toMatchObject({ ok: true, mode: 'incremental', checked: 2, verifiedThrough: full.entries + 2 })
     expect((await verify()).checked).toBe(0)
 
     // An old entry is edited: the incremental check does not re-hash it, the full one finds it.
@@ -162,7 +163,7 @@ describe('anchors and the tail of the log', () => {
 
     await h.admin('/admin/agents', { method: 'POST', body: { name: 'after-anchor-1' } })
     await h.admin('/admin/agents', { method: 'POST', body: { name: 'after-anchor-2' } })
-    expect((await head()).unanchoredEntries).toBe(2)
+    expect((await head()).unanchoredEntries).toBe(4) // two agents, two entries each
   })
 
   it('reports a log shorter than its latest anchor: the newest entries were deleted', async () => {

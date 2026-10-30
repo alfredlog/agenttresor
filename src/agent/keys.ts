@@ -60,15 +60,21 @@ export async function loadOrCreateAgentKey (dataDir: string): Promise<LoadedKey>
  * already open with this same key is fine; with another key the agent cannot
  * sign for that vault, so it stops.
  */
+/** The proxy refused the agent's key; `status` 401 means the API key itself is not (or no longer) valid. */
+export class AgentKeyError extends Error {
+  constructor (message: string, readonly status: number) { super(message) }
+}
+
 export async function registerAgentKey (client: ProxyClient, publicKey: string): Promise<'registered' | 'already_open'> {
   const res = await client.registerKey(publicKey)
   if (res.status === 200) return 'registered'
   if (res.status === 409 && res.body?.code === 'VAULT_OPEN') {
     if (res.body.agentPub === publicKey) return 'already_open'
-    throw new Error(
+    throw new AgentKeyError(
       `the vault of this agent is funded for another key (${String(res.body.agentPub).slice(0, 16)}…), not this agent's key ` +
-      `(${publicKey.slice(0, 16)}…). Restore the original ${AGENT_KEY_FILE}, or ask the company to reclaim the vault and fund it again.`
+      `(${publicKey.slice(0, 16)}…). Restore the original ${AGENT_KEY_FILE}, or ask the company to reclaim the vault and fund it again.`,
+      409
     )
   }
-  throw new Error(`the proxy refused the agent key (${res.status}): ${String(res.body?.error ?? 'no details')}`)
+  throw new AgentKeyError(`the proxy refused the agent key (${res.status}): ${String(res.body?.error ?? 'no details')}`, res.status)
 }

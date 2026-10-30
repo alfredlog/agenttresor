@@ -1,6 +1,7 @@
 /**
  * Spend-control proxy: `npm run proxy`.
- * Env: PROXY_ROOT_KEY (64 hex chars), ADMIN_TOKEN (>= 16 chars), PROXY_PORT (default 5050), BSV_NETWORK.
+ * Env: PROXY_ROOT_KEY (64 hex chars), ADMIN_TOKEN (>= 16 chars), PROXY_PORT (default 5050), BSV_NETWORK,
+ * PROXY_PUBLIC_URL (e.g. https://agentpay.example, for connection links), TRUST_PROXY=1 behind a reverse proxy.
  *
  * The proxy holds no funds. PROXY_ROOT_KEY only derives the policy key of each
  * vault (one of the two keys a payment needs) and the proxy's identity key.
@@ -31,7 +32,9 @@ const app = createProxyApp({
   broadcaster: new ArcadeBroadcaster(arcadeUrl(network)),
   notifier: new CompositeNotifier([new DashboardNotifier()]),
   adminToken,
-  network
+  network,
+  publicUrl: process.env.PROXY_PUBLIC_URL === undefined || process.env.PROXY_PUBLIC_URL === '' ? undefined : process.env.PROXY_PUBLIC_URL,
+  trustProxy: process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true'
 })
 const server = app.listen(port, () => {
   console.log(`proxy on http://localhost:${port} (${network}), identity key ${policyRootKey.toPublicKey().toString()}`)

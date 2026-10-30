@@ -47,8 +47,8 @@ interface McpAgent {
 
 /** An agent as the MCP server runs it: own key file, key registered, vault funded by the company. */
 async function startAgent (name: string, vaultSats: number): Promise<McpAgent> {
-  const created = await h.admin('/admin/agents', { method: 'POST', body: { name, rules: rules.value } })
-  const agent = { id: created.body.id, calls: [] } as unknown as McpAgent
+  const created = await h.newAgent(name, rules.value)
+  const agent = { id: created.id, calls: [] } as unknown as McpAgent
   const observed: typeof fetch = async (input, init) => {
     const url = new URL(String(input))
     agent.calls.push(`${init?.method ?? 'GET'} ${url.pathname}`)
@@ -57,7 +57,7 @@ async function startAgent (name: string, vaultSats: number): Promise<McpAgent> {
     const body = agent.tamper(await res.json())
     return new Response(JSON.stringify(body), { status: res.status, headers: { 'content-type': 'application/json' } })
   }
-  agent.client = new ProxyClient({ proxyUrl: h.url, apiKey: created.body.apiKey, fetch: observed })
+  agent.client = new ProxyClient({ proxyUrl: h.url, apiKey: created.apiKey, fetch: observed })
   const key = await loadOrCreateAgentKey(join(dataRoot, agent.id))
   await registerAgentKey(agent.client, key.publicKey)
   agent.publicKey = key.publicKey
@@ -85,8 +85,8 @@ afterAll(async () => {
 
 describe('agent key', () => {
   it('is created with mode 0600, reused on restart, and its public key registered with the proxy', async () => {
-    const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'key-bot', rules: rules.value } })
-    const client = new ProxyClient({ proxyUrl: h.url, apiKey: created.body.apiKey })
+    const created = await h.newAgent('key-bot', rules.value)
+    const client = new ProxyClient({ proxyUrl: h.url, apiKey: created.apiKey })
     const dir = join(dataRoot, 'key-bot')
 
     const first = await loadOrCreateAgentKey(dir)
@@ -101,9 +101,9 @@ describe('agent key', () => {
     expect(await registerAgentKey(client, restart.publicKey)).toBe('registered') // same key, still unfunded
 
     // Once the vault is funded, a restart with the same key is fine…
-    await fundVault(h.company, h.url, ADMIN_TOKEN, created.body.id, 5_000, fingerprint(first.publicKey))
+    await fundVault(h.company, h.url, ADMIN_TOKEN, created.id, 5_000, fingerprint(first.publicKey))
     expect(await registerAgentKey(client, (await loadOrCreateAgentKey(dir)).publicKey)).toBe('already_open')
-    expect((await h.admin(`/admin/vaults`)).body.vaults.find((v: any) => v.agentId === created.body.id).status).toBe('open')
+    expect((await h.admin(`/admin/vaults`)).body.vaults.find((v: any) => v.agentId === created.id).status).toBe('open')
     // …a different key stops the agent with a clear error.
     const other = await loadOrCreateAgentKey(join(dataRoot, 'key-bot-other'))
     await expect(registerAgentKey(client, other.publicKey)).rejects.toThrow(/funded for another key/)

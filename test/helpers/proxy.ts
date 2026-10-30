@@ -44,6 +44,8 @@ export interface ProxyHarness {
   sign: (agent: TestAgent, answer: VaultSignAnswer, expectedPriceSats: number) => Promise<Res>
   /** pay + sign in one go, for requests the rules allow. */
   payAndSign: (agent: TestAgent, body: unknown, expectedPriceSats: number) => Promise<Res>
+  /** Creates an agent and connects it with its one-time code: its id and API key, nothing registered yet. */
+  newAgent: (name: string, rules?: object) => Promise<{ id: string, apiKey: string }>
   /** Creates an agent, registers its key and, if `vaultSats` > 0, funds its vault from the company wallet. */
   createAgent: (name: string, rules: object, vaultSats?: number) => Promise<TestAgent>
   close: () => Promise<void>
@@ -70,7 +72,9 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     notifier: opts.notifier ?? new DashboardNotifier(),
     adminToken: ADMIN_TOKEN,
     network: 'test',
-    now: () => Date.now() + clock.offset
+    now: () => Date.now() + clock.offset,
+    // Every test connects from 127.0.0.1.
+    connectRateLimit: { max: 10_000, windowMs: 60_000 }
   }))
 
   const call = async (path: string, token: string | undefined, init: { method?: string, body?: unknown } = {}): Promise<Res> => {
@@ -89,10 +93,18 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     return await sign(agent, res.body, expectedPriceSats)
   }
 
-  const createAgent = async (name: string, rules: object, vaultSats = 0): Promise<TestAgent> => {
-    const created = await admin('/admin/agents', { method: 'POST', body: { name, rules } })
+  const newAgent = async (name: string, rules?: object): Promise<{ id: string, apiKey: string }> => {
+    const created = await admin('/admin/agents', { method: 'POST', body: rules === undefined ? { name } : { name, rules } })
     if (created.status !== 201) throw new Error(`agent not created: ${JSON.stringify(created.body)}`)
-    const agent: TestAgent = { id: created.body.id, key: created.body.apiKey, signer: PrivateKey.fromRandom() }
+    // The API key only exists once the agent exchanges its one-time code.
+    const connected = await call('/v1/connect', undefined, { method: 'POST', body: { code: created.body.connectCode } })
+    if (connected.status !== 200) throw new Error(`agent not connected: ${JSON.stringify(connected.body)}`)
+    return { id: created.body.id, apiKey: connected.body.apiKey }
+  }
+
+  const createAgent = async (name: string, rules: object, vaultSats = 0): Promise<TestAgent> => {
+    const created = await newAgent(name, rules)
+    const agent: TestAgent = { id: created.id, key: created.apiKey, signer: PrivateKey.fromRandom() }
     const reg = await call('/v1/vault/agent-key', agent.key, { method: 'POST', body: { publicKey: agent.signer.toPublicKey().toString() } })
     if (reg.status !== 200) throw new Error(`agent key not registered: ${JSON.stringify(reg.body)}`)
     if (vaultSats > 0) await fundVault(company, url, ADMIN_TOKEN, agent.id, vaultSats, fp(agent))
@@ -112,6 +124,7 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     pay,
     sign,
     payAndSign,
+    newAgent,
     createAgent,
     close: async () => {
       for (const s of servers) await new Promise(resolve => s.close(resolve))
