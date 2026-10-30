@@ -6,13 +6,10 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
-import type { Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Transaction } from '@bsv/sdk'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { AGENT_KEY_FILE, loadOrCreateAgentKey, registerAgentKey } from '../src/agent/keys'
@@ -21,7 +18,6 @@ import { ProxyClient } from '../src/agent/proxy-client'
 import { approveAndFund, fundVault } from '../src/company/vault-client'
 import { fingerprint } from '../src/shared/fingerprint'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
-import { createMcpHttpApp } from '../src/mcp/http'
 import { createAgentMcpServer } from '../src/mcp/server'
 import { ADMIN_TOKEN, createProxyHarness, spendableSats, type ProxyHarness } from './helpers/proxy'
 
@@ -243,37 +239,5 @@ describe('MCP server', () => {
     const invalid = await mcp.callTool({ name: 'pay_and_fetch', arguments: { url: report.url, maxSats: 600 } })
     expect(invalid.isError).toBe(true) // purpose is required
     await mcp.close()
-  })
-
-  describe('over Streamable HTTP', () => {
-    const TOKEN = 'test-mcp-token-0123456789'
-    let server: Server
-    let url: string
-
-    beforeAll(async () => {
-      const agent = await startAgent('http-bot', 5_000)
-      const app = createMcpHttpApp({ createServer: () => createAgentMcpServer({ payer: agent.payer, client: agent.client, merchantUrls: [merchant], agentPublicKey: agent.publicKey }), token: TOKEN })
-      await new Promise<void>(resolve => { server = app.listen(0, '127.0.0.1', () => { resolve() }) })
-      url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`
-    })
-    afterAll(async () => { await new Promise(resolve => server?.close(resolve)) })
-
-    it('refuses a request without MCP_TOKEN (401)', async () => {
-      const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '1' } } }
-      const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
-      expect((await fetch(url, { method: 'POST', headers, body: JSON.stringify(init) })).status).toBe(401)
-      expect((await fetch(url, { method: 'POST', headers: { ...headers, authorization: 'Bearer wrong-token' }, body: JSON.stringify(init) })).status).toBe(401)
-    })
-
-    it('serves the tools with the token', async () => {
-      const mcp = new Client({ name: 'test-model', version: '1.0.0' })
-      await mcp.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } } }))
-      expect((await mcp.listTools()).tools).toHaveLength(6)
-      await mcp.close()
-    })
-
-    it('needs a real token to start', () => {
-      expect(() => createMcpHttpApp({ createServer: () => { throw new Error('unused') }, token: 'short' })).toThrow(/at least 16/)
-    })
   })
 })

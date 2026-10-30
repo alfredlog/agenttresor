@@ -169,19 +169,22 @@ describe('npm run connect', () => {
     expect(() => parseConnectArgs([], { PROXY_URL: 'https://x.example' })).toThrow(/no connection code/)
   })
 
-  it('writes a 0600 config, creates the agent key and registers it', async () => {
+  it('writes a 0600 config into the agent\'s profile, creates the agent key and registers it', async () => {
     const created = await create('cli-bot')
     const dataDir = await dir()
     const r = await connectAgent(parseConnectArgs([created.connectUrl], {}), dataDir)
 
-    const configPath = join(dataDir, AGENT_CONFIG_FILE)
-    expect(r).toMatchObject({ agentId: created.id, proxyUrl: h.url, configPath, registration: 'registered' })
+    const profile = join(dataDir, 'agents', created.id)
+    const configPath = join(profile, AGENT_CONFIG_FILE)
+    expect(r).toMatchObject({ agentId: created.id, proxyUrl: h.url, profileDir: profile, configPath, registration: 'registered' })
+    expect((await stat(profile)).mode & 0o777).toBe(0o700)
     expect((await stat(configPath)).mode & 0o777).toBe(0o600)
     const config = JSON.parse(await readFile(configPath, 'utf8'))
     expect(config).toMatchObject({ proxyUrl: h.url, agentId: created.id, apiKey: expect.stringMatching(/^agt_/), merchants: [{ name: merchantHost }] })
     expect(JSON.stringify(r)).not.toMatch(/agt_/) // what the CLI prints from
 
-    const key = JSON.parse(await readFile(join(dataDir, AGENT_KEY_FILE), 'utf8'))
+    const key = JSON.parse(await readFile(join(profile, AGENT_KEY_FILE), 'utf8'))
+    expect((await stat(join(profile, AGENT_KEY_FILE))).mode & 0o777).toBe(0o600)
     expect(r.fingerprint).toBe(fingerprint(key.publicKey))
     expect((await h.db('vaults').where({ agent_id: created.id }).first()).agent_pub).toBe(key.publicKey)
     // Used up.
@@ -231,8 +234,7 @@ describe('the MCP server', () => {
 
   it('reads the config written by connect; env vars override it', async () => {
     const created = await create('mcp-bot')
-    const dataDir = await dir()
-    await connectAgent(parseConnectArgs([created.connectUrl], {}), dataDir)
+    const { profileDir: dataDir } = await connectAgent(parseConnectArgs([created.connectUrl], {}), await dir())
     const { mcp, disconnected } = await connectMcp(dataDir)
     expect(disconnected).toBeUndefined()
     expect(textOf(await mcp.callTool({ name: 'list_services', arguments: {} }))).toContain(`${merchant}/api/report`)
@@ -261,8 +263,8 @@ describe('the API key is only ever in the /v1/connect answer', () => {
     try {
       // A whole agent life: created, connected, funded, paying, listed, and given a new code.
       const created = (await realAdmin('/admin/agents', { name: 'leak-bot', rules: rules() })) as any
-      const dataDir = await dir()
-      const r = await connectAgent(parseConnectArgs([created.connectUrl], {}), dataDir)
+      const r = await connectAgent(parseConnectArgs([created.connectUrl], {}), await dir())
+      const dataDir = r.profileDir
       apiKey = JSON.parse(await readFile(join(dataDir, AGENT_CONFIG_FILE), 'utf8')).apiKey
       await fundVault(h.company, h.url, ADMIN_TOKEN, created.id, 5_000, r.fingerprint)
 
