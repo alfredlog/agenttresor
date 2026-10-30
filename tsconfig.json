@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node"],
+    // Same single-SDK rule as vitest.config.ts, for types: wallet-toolbox's CJS
+    // declarations use the CJS build of @bsv/sdk, so ours must too.
+    "paths": {
+      "@bsv/sdk": ["./node_modules/@bsv/sdk/dist/cjs/mod.d.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}
