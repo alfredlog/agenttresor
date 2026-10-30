@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentTresor Dashboard</title>
+  <style>
+    :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --card: #fff; --ok: #1f7a4d; --warn: #9a6200; --bad: #b3261e; --accent: #2b59c3; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --card: #1f1f1d; --ok: #5cc28f; --warn: #e0a84a; --bad: #f08a80; --accent: #8fb0ff; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 28px 0 10px; }
+    .muted { color: var(--muted); }
+    .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 16px 0; }
+    input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); min-width: 260px; }
+    button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
+    button.approve { border-color: var(--ok); color: var(--ok); }
+    button.deny { border-color: var(--bad); color: var(--bad); }
+    .table { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-weight: 600; color: var(--muted); font-size: 12px; }
+    tr:last-child td { border-bottom: 0; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .url { max-width: 280px; word-break: break-all; }
+    .status-paid { color: var(--ok); }
+    .status-paid_not_delivered { color: var(--warn); }
+    a { color: var(--accent); }
+    #error { color: var(--bad); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>AgentTresor</h1>
+  <div class="muted">Spend control for AI agents. Approve or deny payments above the threshold; every payment is in the ledger.</div>
+
+  <div class="bar">
+    <input id="token" type="password" placeholder="Admin token" autocomplete="off">
+    <button id="save">Use token</button>
+    <span id="error"></span>
+  </div>
+
+  <h2>Pending approvals</h2>
+  <div class="table"><table>
+    <thead><tr><th>Request</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th>Created</th><th></th></tr></thead>
+    <tbody id="pending"><tr><td colspan="7" class="muted">Enter the admin token.</td></tr></tbody>
+  </table></div>
+
+  <h2>Ledger <span id="total" class="muted"></span></h2>
+  <div class="table"><table>
+    <thead><tr><th>Paid</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th>Status</th><th>Transaction</th></tr></thead>
+    <tbody id="ledger"></tbody>
+  </table></div>
+</main>
+<script>
+  // The token lives in sessionStorage only, so it is gone when the tab closes.
+  const store = {
+    get () { try { return sessionStorage.getItem('adminToken') || '' } catch { return '' } },
+    set (v) { try { sessionStorage.setItem('adminToken', v) } catch {} }
+  }
+  const $ = id => document.getElementById(id)
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  const time = v => v ? new Date(v).toLocaleString() : ''
+
+  async function api (path, init = {}) {
+    const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${store.get()}`, ...(init.headers || {}) } })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+    return body
+  }
+
+  async function refresh () {
+    if (!store.get()) return
+    try {
+      const [{ requests }, ledger] = await Promise.all([api('/admin/requests?status=pending'), api('/admin/ledger')])
+      $('error').textContent = ''
+      $('pending').innerHTML = requests.length === 0
+        ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
+        : requests.map(r => `<tr>
+            <td class="mono">${esc(r.requestId)}</td><td>${esc(r.agentName)}</td><td>${esc(r.purpose)}</td>
+            <td class="url mono">${esc(r.method)} ${esc(r.url)}</td><td class="num">${esc(r.satoshis)}</td><td>${esc(time(r.createdAt))}</td>
+            <td><button class="approve" data-id="${esc(r.requestId)}" data-action="approve">Approve</button>
+                <button class="deny" data-id="${esc(r.requestId)}" data-action="deny">Deny</button></td></tr>`).join('')
+      $('total').textContent = `· ${ledger.totalSats} sats on ${ledger.network === 'test' ? 'testnet' : 'mainnet'}`
+      $('ledger').innerHTML = ledger.entries.length === 0
+        ? '<tr><td colspan="7" class="muted">No payments yet.</td></tr>'
+        : ledger.entries.map(e => `<tr>
+            <td>${esc(time(e.paidAt))}</td><td>${esc(e.agentName)}</td><td>${esc(e.purpose)}</td>
+            <td class="url mono">${esc(e.method)} ${esc(e.url)}</td><td class="num">${esc(e.satoshis)}</td>
+            <td class="status-${esc(e.status)}">${esc(e.status.replaceAll('_', ' '))}</td>
+            <td class="mono">${e.explorerUrl ? `<a href="${esc(e.explorerUrl)}" target="_blank" rel="noopener">${esc(e.txid.slice(0, 12))}…</a>` : ''}</td></tr>`).join('')
+    } catch (err) {
+      $('error').textContent = err.message
+    }
+  }
+
+  $('pending').addEventListener('click', async ev => {
+    const btn = ev.target.closest('button[data-action]')
+    if (!btn) return
+    const { id, action } = btn.dataset
+    let body
+    if (action === 'deny') {
+      const reason = prompt(`Reason for denying ${id}?`, '')
+      if (reason === null) return
+      body = JSON.stringify({ reason })
+    }
+    btn.disabled = true
+    try { await api(`/admin/requests/${encodeURIComponent(id)}/${action}`, { method: 'POST', body }) } catch (err) { $('error').textContent = err.message }
+    await refresh()
+  })
+
+  $('save').addEventListener('click', () => { store.set($('token').value.trim()); $('token').value = ''; refresh() })
+  $('token').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('save').click() })
+  refresh()
+  setInterval(refresh, 5000)
+</script>
+</body>
+</html>

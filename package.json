@@ -9,6 +9,7 @@
   },
   "scripts": {
     "merchant": "tsx src/merchant/server.ts",
+    "proxy": "tsx src/proxy/server.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
