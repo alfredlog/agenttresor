@@ -1,10 +1,17 @@
 /**
- * Calls a merchant on the agent's behalf. The price is always read from an
- * unpaid preflight (402 with x-bsv-sats and x-bsv-server) and checked against
- * the rules before anything is paid; create402Fetch would pay blindly.
+ * Calls a BRC-121 merchant. The price is always read from an unpaid preflight
+ * (402 with x-bsv-sats and x-bsv-server) before anything is paid;
+ * create402Fetch would pay blindly. Used by the proxy (to apply the rules) and
+ * by the agent (to know the price independently of the proxy).
  */
-import { HEADER_SATS, HEADER_SERVER, type PaymentHeaders } from '../shared/brc121.js'
-import type { MerchantAnswer } from './store.js'
+import { HEADER_SATS, HEADER_SERVER, type PaymentHeaders } from './brc121.js'
+
+/** What the merchant answered (stored for the agent and the audit log). */
+export interface MerchantAnswer {
+  status: number
+  contentType: string | null
+  body: unknown
+}
 
 export interface MerchantCall {
   url: string

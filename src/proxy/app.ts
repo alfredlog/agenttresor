@@ -46,6 +46,7 @@ function requestView (r: PaymentRequestRecord): Record<string, unknown> {
     status: r.status,
     url: r.url,
     method: r.method,
+    body: r.body ?? undefined,
     purpose: r.purpose,
     satoshis: r.priceSats,
     reason: r.reason,
@@ -283,7 +284,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   app.use('/admin', admin)
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (err instanceof ProxyError) { res.status(err.httpStatus).json({ error: err.message }); return }
+    if (err instanceof ProxyError) { res.status(err.httpStatus).json({ ...err.details, error: err.message }); return }
     const status = (err as { status?: number }).status
     if (status === 400 || status === 413) { res.status(status).json({ error: 'invalid request body' }); return }
     console.error('proxy error:', err instanceof Error ? err.message : String(err))

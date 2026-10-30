@@ -73,7 +73,8 @@ export class VaultService {
   async registerAgentKey (agentId: string, publicKey: unknown): Promise<Vault> {
     if (!isCompressedPubHex(publicKey)) throw new ProxyError(400, 'publicKey must be a compressed public key (66 hex chars)')
     const vault = await this.store.getVault(agentId)
-    if (vault?.status === 'open') throw new ProxyError(409, 'the vault is funded with the current key; the company must reclaim it first')
+    // The registered key is public; returning it lets an agent see whether its own key is the one in use.
+    if (vault?.status === 'open') throw new ProxyError(409, 'the vault is funded with the current key; the company must reclaim it first', { code: 'VAULT_OPEN', agentPub: vault.agentPub })
     await this.store.setAgentKey(agentId, publicKey, this.now())
     return (await this.store.getVault(agentId))!
   }
@@ -187,7 +188,7 @@ export class VaultService {
 
   /** Builds the payment of `sats` to the merchant `serverKey` and keeps it until the agent signs. */
   async prepare (agentId: string, requestId: string, sats: number, serverKey: string): Promise<SignRequest> {
-    if (await this.inFlight(agentId) !== undefined) throw new ProxyError(409, 'a vault payment is already waiting for a signature')
+    if (await this.inFlight(agentId) !== undefined) throw new ProxyError(409, 'a vault payment is already waiting for a signature', { code: 'SIGNATURE_PENDING' })
     const vault = await this.openVault(agentId)
 
     // BRC-29 derivation exactly as @bsv/402-pay's client does it, with the proxy as sender.
@@ -231,10 +232,10 @@ export class VaultService {
   async finalize (agentId: string, requestId: string, signatureHex: unknown): Promise<FinalizedPayment> {
     const now = this.now()
     const attempt = (await this.store.awaitingSignature(agentId)).find(a => a.requestId === requestId)
-    if (attempt === undefined) throw new ProxyError(409, 'no payment is waiting for a signature for this request; call execute again')
+    if (attempt === undefined) throw new ProxyError(409, 'no payment is waiting for a signature for this request; call execute again', { code: 'SIGN_WINDOW_EXPIRED' })
     if (now - attempt.createdAt > SIGN_WINDOW_MS) {
       await this.store.updateTx(attempt.id, { status: 'expired', reason: 'signature arrived too late', updatedAt: now })
-      throw new ProxyError(409, `signature arrived more than ${SIGN_WINDOW_MS / 1000} s after the payment was built; call execute to build it again`)
+      throw new ProxyError(409, `signature arrived more than ${SIGN_WINDOW_MS / 1000} s after the payment was built; call execute to build it again`, { code: 'SIGN_WINDOW_EXPIRED' })
     }
     const vault = await this.store.getVault(agentId)
     if (vault?.status !== 'open' || `${vault.txid!}.${vault.vout!}` !== attempt.inputOutpoint) {

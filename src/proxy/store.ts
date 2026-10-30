@@ -5,6 +5,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import makeKnex, { type Knex } from 'knex'
+import type { MerchantAnswer } from '../shared/merchant.js'
 import { DEFAULT_RULES, type Rules } from './rules.js'
 
 export type RequestStatus = 'pending' | 'approved' | 'denied' | 'paid' | 'paid_not_delivered' | 'failed' | 'expired'
@@ -19,12 +20,7 @@ export interface Agent {
   createdAt: number
 }
 
-/** What the merchant answered (stored for the agent and the audit log). */
-export interface MerchantAnswer {
-  status: number
-  contentType: string | null
-  body: unknown
-}
+export type { MerchantAnswer } from '../shared/merchant.js'
 
 export interface PaymentRequestRecord {
   id: string
