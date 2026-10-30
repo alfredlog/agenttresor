@@ -5,3 +5,5 @@ node_modules/
 data/
 dist/
 .DS_Store
+# Built by npm run build:web
+public/vault.js

@@ -1,18 +1,22 @@
 /**
  * Spend control: every payment an agent asks for is priced by an unpaid
- * preflight, checked against the company's rules, then paid (or held for a
- * human, or refused). Every request is kept in the ledger.
+ * preflight, checked against the company's rules and the vault balance, then
+ * built as a vault transaction for the agent to sign (or held for a human, or
+ * refused). Every request is kept in the ledger.
  *
  * Requests of one agent are serialized (rules check + payment), so two
  * concurrent requests cannot both pass the daily budget. This lock is per
  * process: run one proxy process per database.
  */
 import { randomBytes } from 'node:crypto'
+import type { VaultService, SignRequest, FinalizedPayment } from '../vault/service.js'
+import { ProxyError } from './errors.js'
 import { callMerchant, preflight, type MerchantCall } from './merchant.js'
-import { paymentTxid, type Payer } from './payer.js'
 import type { Notifier } from './notifier.js'
 import { dayStart, evaluate, hostAllowed, type Rules } from './rules.js'
 import type { Agent, MerchantAnswer, PaymentRequestRecord, ProxyStore } from './store.js'
+
+export { ProxyError }
 
 export interface PayInput {
   url: string
@@ -21,18 +25,18 @@ export interface PayInput {
   purpose: string
 }
 
-/** A request record and the HTTP status to answer with, or a free answer (nothing paid, nothing recorded). */
+/**
+ * A request record and the HTTP status to answer with; a payment the agent
+ * must sign; or a free answer (nothing paid, nothing recorded).
+ */
 export type Outcome =
   | { kind: 'record', record: PaymentRequestRecord, httpStatus: number }
+  | { kind: 'sign', record: PaymentRequestRecord, sign: SignRequest }
   | { kind: 'free', answer: MerchantAnswer }
-
-export class ProxyError extends Error {
-  constructor (readonly httpStatus: number, message: string) { super(message) }
-}
 
 export interface ServiceOptions {
   store: ProxyStore
-  payer: Payer
+  vault: VaultService
   notifier: Notifier
   now: () => number
   /** A pending request expires after this long without a decision (default 7 days). */
@@ -49,7 +53,7 @@ export function newRequestId (): string {
 
 export class SpendControl {
   private readonly store: ProxyStore
-  private readonly payer: Payer
+  private readonly vault: VaultService
   private readonly notifier: Notifier
   private readonly now: () => number
   private readonly ttl: { pendingMs: number, approvedMs: number }
@@ -57,7 +61,7 @@ export class SpendControl {
 
   constructor (opts: ServiceOptions) {
     this.store = opts.store
-    this.payer = opts.payer
+    this.vault = opts.vault
     this.notifier = opts.notifier
     this.now = opts.now
     this.ttl = { pendingMs: opts.pendingTtlMs ?? 7 * 86_400_000, approvedMs: opts.approvedTtlMs ?? 86_400_000 }
@@ -66,6 +70,9 @@ export class SpendControl {
   /** POST /v1/pay */
   async requestPayment (agent: Agent, input: PayInput): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
+      if (await this.vault.inFlight(agent.id) !== undefined) {
+        throw new ProxyError(409, 'a vault payment is already waiting for a signature')
+      }
       const now = this.now()
       const rules = await this.store.getRules(agent.id)
       const host = new URL(input.url).host
@@ -109,6 +116,9 @@ export class SpendControl {
       const spent = await this.store.spentSince(agent.id, dayStart(now))
       const decision = evaluate(rules, spent, host, pf.sats)
       if (decision.decision === 'deny') return await refuse('denied', decision.reason, 403, priced)
+      // The vault balance is a hard on-chain cap: no point asking a human for more than it holds.
+      const short = await this.vault.capacityProblem(agent.id, pf.sats)
+      if (short !== undefined) return await refuse('denied', short, 403, priced)
 
       if (decision.decision === 'needs_approval') {
         const record = await this.store.insertRequest({ ...base, ...priced, status: 'pending' })
@@ -117,18 +127,21 @@ export class SpendControl {
       }
 
       const record = await this.store.insertRequest({ ...base, ...priced, status: 'approved', decidedAt: now, decidedBy: 'rules' })
-      return await this.payAndDeliver(record, input, pf.sats, pf.serverKey)
+      return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
     })
   }
 
-  /** POST /v1/requests/:id/execute: pay an approved request. */
+  /** POST /v1/requests/:id/execute: build the vault payment of an approved request. */
   async execute (agent: Agent, id: string): Promise<Outcome> {
     return await this.withAgentLock(agent.id, async () => {
       const record = await this.getOwnRequest(agent, id)
       if (record.status !== 'approved') {
         throw new ProxyError(409, `request is ${record.status}${record.reason !== null ? `: ${record.reason}` : ''}`)
       }
-      const call: MerchantCall = { url: record.url, method: record.method, body: record.body ?? undefined }
+      if (await this.vault.inFlight(agent.id) !== undefined) {
+        throw new ProxyError(409, 'a vault payment is already waiting for a signature')
+      }
+      const call = callOf(record)
       // The approval may be hours old and BRC-121 payments are only valid for 30 s: ask the price again.
       let pf
       try {
@@ -155,7 +168,19 @@ export class SpendControl {
       if (decision.decision === 'deny') {
         return { kind: 'record', record: await this.store.updateRequest(id, { status: 'denied', reason: decision.reason, decidedBy: 'rules' }), httpStatus: 403 }
       }
-      return await this.payAndDeliver(record, call, pf.sats, pf.serverKey)
+      const short = await this.vault.capacityProblem(agent.id, pf.sats)
+      if (short !== undefined) throw new ProxyError(403, short)
+      return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
+    })
+  }
+
+  /** POST /v1/requests/:id/sign: complete, broadcast and deliver the payment the agent signed. */
+  async sign (agent: Agent, id: string, signature: unknown): Promise<Outcome> {
+    return await this.withAgentLock(agent.id, async () => {
+      const record = await this.getOwnRequest(agent, id)
+      if (record.status !== 'approved') throw new ProxyError(409, `request is ${record.status}`)
+      const payment = await this.vault.finalize(agent.id, id, signature)
+      return await this.deliver(record, payment)
     })
   }
 
@@ -167,7 +192,7 @@ export class SpendControl {
     return record
   }
 
-  async budget (agent: Agent): Promise<{ rules: Rules, spentTodaySats: number, remainingTodaySats: number, day: string }> {
+  async budget (agent: Agent): Promise<{ rules: Rules, spentTodaySats: number, remainingTodaySats: number, day: string, vault: { status: string, satoshis: number, outpoint: string | null } }> {
     const now = this.now()
     const rules = await this.store.getRules(agent.id)
     const spent = await this.store.spentSince(agent.id, dayStart(now))
@@ -175,7 +200,8 @@ export class SpendControl {
       rules,
       spentTodaySats: spent,
       remainingTodaySats: Math.max(0, rules.dailyBudgetSats - spent),
-      day: new Date(dayStart(now)).toISOString().slice(0, 10)
+      day: new Date(dayStart(now)).toISOString().slice(0, 10),
+      vault: await this.vault.balance(agent.id)
     }
   }
 
@@ -205,26 +231,18 @@ export class SpendControl {
   }
 
   /**
-   * Pays and delivers. The sats leave the wallet once the headers are built, so
-   * from then on the request counts against the budget whatever the merchant does.
+   * Sends the paid request to the merchant. The payment is on chain already,
+   * so from here on it counts against the budget whatever the merchant does.
    */
-  private async payAndDeliver (record: PaymentRequestRecord, call: MerchantCall, sats: number, serverKey: string): Promise<Outcome> {
+  private async deliver (record: PaymentRequestRecord, payment: FinalizedPayment): Promise<Outcome> {
     const id = record.id
-    let headers
-    try {
-      headers = await this.payer.pay(call.url, sats, serverKey)
-    } catch (err) {
-      return { kind: 'record', record: await this.store.updateRequest(id, { status: 'failed', reason: `payment could not be made: ${errorMessage(err)}` }), httpStatus: 502 }
-    }
-    let txid: string | null = null
-    try { txid = paymentTxid(headers) } catch {}
     // Recorded before delivery, so a crash below still leaves the payment in the ledger.
     await this.store.updateRequest(id, {
-      status: 'paid_not_delivered', reason: 'delivery in progress', txid, priceSats: sats, serverKey, paidAt: this.now()
+      status: 'paid_not_delivered', reason: 'delivery in progress', txid: payment.txid, priceSats: payment.priceSats, paidAt: this.now()
     })
     let answer: MerchantAnswer
     try {
-      answer = await callMerchant(call, headers)
+      answer = await callMerchant(callOf(record), payment.headers)
     } catch (err) {
       return { kind: 'record', record: await this.store.updateRequest(id, { reason: `merchant unreachable after payment: ${errorMessage(err)}` }), httpStatus: 502 }
     }
@@ -257,4 +275,8 @@ export class SpendControl {
       if (this.locks.get(agentId) === tail) this.locks.delete(agentId)
     }
   }
+}
+
+function callOf (record: PaymentRequestRecord): MerchantCall {
+  return { url: record.url, method: record.method, body: record.body ?? undefined }
 }

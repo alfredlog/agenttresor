@@ -9,7 +9,8 @@
   },
   "scripts": {
     "merchant": "tsx src/merchant/server.ts",
-    "proxy": "tsx src/proxy/server.ts",
+    "proxy": "npm run build:web && tsx src/proxy/server.ts",
+    "build:web": "node scripts/build-web.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -26,6 +27,7 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
+    "esbuild": "0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12"

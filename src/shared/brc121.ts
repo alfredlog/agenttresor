@@ -6,11 +6,13 @@
 import { createRequire } from 'node:module'
 import type * as Server from '@bsv/402-pay/server'
 import type * as Client from '@bsv/402-pay/client'
+import type * as Root from '@bsv/402-pay'
 import type { WalletInterface } from './bsv.js'
 
 const require = createRequire(import.meta.url)
 const server = require('@bsv/402-pay/server') as typeof Server
 const client = require('@bsv/402-pay/client') as typeof Client
+const root = require('@bsv/402-pay') as typeof Root
 
 export const createPaymentMiddleware = server.createPaymentMiddleware
 export const InMemoryPaymentReplayStore = server.InMemoryPaymentReplayStore
@@ -20,6 +22,9 @@ export type { PaymentResult, PaymentReplayStore } from '@bsv/402-pay/server'
 export const create402Fetch = client.create402Fetch
 export const constructPaymentHeaders = client.constructPaymentHeaders
 export type { PaymentHeaders } from '@bsv/402-pay/client'
+
+/** BRC-29 payment protocol, as 402-pay derives the merchant's key. */
+export const BRC29_PROTOCOL_ID = root.BRC29_PROTOCOL_ID
 
 /** BRC-121 challenge headers. */
 export const HEADER_SATS = 'x-bsv-sats'

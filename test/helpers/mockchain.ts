@@ -24,6 +24,7 @@ import {
   randomBytesBase64,
   randomBytesHex
 } from '@bsv/wallet-toolbox'
+import type { Broadcaster } from '../../src/vault/broadcaster'
 
 export const memoryKnex = (): Knex => makeKnex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true, pool: { min: 1, max: 1 } })
 
@@ -33,6 +34,8 @@ export interface MockChain {
   makeWallet: (rootKey?: PrivateKey) => Promise<Wallet>
   fund: (wallet: Wallet, satoshis?: number) => Promise<void>
   mineBlock: () => Promise<void>
+  /** Broadcasts into the mock chain (it validates scripts like a node). */
+  broadcaster: Broadcaster
   close: () => Promise<void>
 }
 
@@ -122,6 +125,12 @@ export async function createMockChain (): Promise<MockChain> {
     makeWallet,
     fund,
     mineBlock: async () => { await services.mineBlock() },
+    broadcaster: {
+      broadcast: async (atomicBeef: number[], txid: string) => {
+        const [result] = await services.postBeef(Beef.fromBinary(atomicBeef), [txid])
+        if (result?.status !== 'success') throw new Error(`mock chain refused ${txid}`)
+      }
+    },
     close: async () => {
       for (const c of cleanups.reverse()) await c()
       await chainDb.destroy()
