@@ -76,7 +76,7 @@ export async function startOverlay (opts: OverlayOptions): Promise<RunningOverla
 }
 
 function loadOrCreateKey (file: string): string {
-  if (process.env.OVERLAY_PRIVATE_KEY !== undefined) return process.env.OVERLAY_PRIVATE_KEY
+  if (process.env.OVERLAY_PRIVATE_KEY !== undefined && process.env.OVERLAY_PRIVATE_KEY !== '') return process.env.OVERLAY_PRIVATE_KEY
   if (existsSync(file)) return readFileSync(file, 'utf8').trim()
   const key = PrivateKey.fromRandom().toHex()
   mkdirSync(dirname(file), { recursive: true })
