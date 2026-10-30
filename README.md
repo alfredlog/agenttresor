@@ -66,6 +66,24 @@ Arcade and sends the request to the merchant with the BRC-121 payment headers. T
 A request vault that is never spent (price changed, denied at execute, expired after 24 h, or the company changed its
 mind) is listed under *Approved payments* on `/vault.html` and reclaimed by the company alone, like an agent vault.
 
+## Audit log (tamper-evident, anchored on BSV)
+
+Every decision and payment is appended to a hash-chained log in `./data/proxy.sqlite` (`src/audit/log.ts`):
+`hash = sha256(prev_hash + canonical JSON {seq, at, actor, type, data})`, starting from 64 zeros, keys sorted at every
+level. Entries: agent created, rules changed, agent key registered (with its fingerprint), request created / decided /
+paid / paid_not_delivered / failed / expired, vault funded / payment / reclaimed, request vault funded / reclaimed,
+anchor recorded. `actor` is `rules`, `admin`, `agent:<id>` or `company`. API keys appear only as masked hints, and
+the log refuses anything that looks like a key or token.
+
+Editing, removing or reordering a past entry breaks the chain. To also catch a chain rewritten with recomputed hashes,
+the company anchors the head on BSV from its own wallet (dashboard: *Anchor now with BSV Desktop*,
+`src/company/audit-client.ts`): one 0-sat output `OP_FALSE OP_RETURN "agenttresor-audit" <hash> <seq>`. The proxy pays
+nothing; it checks the transaction by SPV and that the hash is the one at that seq, then records the anchor.
+
+- `GET /admin/audit?after=&limit=` — entries and anchors (with WhatsOnChain links); `GET /admin/audit/head`
+- `GET /admin/audit/verify` — the chain, and for each anchor whether the log still matches it
+- `npm run audit:verify [-- path/to/proxy.sqlite]` — the same check from the command line (exit code 1 if tampered)
+
 ## The AI agent (MCP server)
 
 `src/mcp/` is an MCP server that an AI agent (Claude Desktop, Claude Code…) uses to pay for services. It holds
@@ -133,6 +151,8 @@ claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "
   sign, retry once), `vault-signer.ts` (checks a payment before signing it)
 - `src/mcp/` — the agent's MCP server: `server.ts` (tools), `http.ts` (Streamable HTTP + Bearer token), `main.ts`
 - `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
+- `src/audit/` — the hash-chained audit log, the OP_RETURN anchor script, anchor checks, `audit:verify`
+- `src/company/audit-client.ts` — `anchorAuditHead` against any BRC-100 wallet (`public/audit.js` in the browser)
 - `src/shared/fingerprint.ts` — agent key fingerprint, shared by the agent, the dashboard (`public/fingerprint.js`)
   and the vault page
 - `test/helpers/` — offline mock chain, test wallets and a proxy harness

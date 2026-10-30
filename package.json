@@ -12,6 +12,7 @@
     "proxy": "npm run build:web && tsx src/proxy/server.ts",
     "mcp": "tsx src/mcp/main.ts",
     "mcp:http": "tsx src/mcp/main.ts --http",
+    "audit:verify": "tsx src/audit/verify-cli.ts",
     "build:web": "node scripts/build-web.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

@@ -19,7 +19,8 @@ export interface ProxyAdmin {
   adminToken: string
 }
 
-async function proxyCall<T> (admin: ProxyAdmin, path: string, body?: unknown): Promise<T> {
+/** Admin API call to the proxy (Bearer ADMIN_TOKEN); throws with the proxy's error message. */
+export async function proxyCall<T> (admin: ProxyAdmin, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${admin.proxyUrl.replace(/\/$/, '')}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${admin.adminToken}` },

@@ -6,6 +6,6 @@
  */
 export {
   Beef, CachedKeyDeriver, Hash, KeyDeriver, LockingScript, OP, P2PKH, PrivateKey, PublicKey, Random,
-  SatoshisPerKilobyte, Signature, Spend, Transaction, TransactionSignature, UnlockingScript, Utils, WalletClient
+  SatoshisPerKilobyte, Script, Signature, Spend, Transaction, TransactionSignature, UnlockingScript, Utils, WalletClient
 } from '@bsv/sdk'
 export type { ChainTracker, WalletInterface, WalletProtocol } from '@bsv/sdk'

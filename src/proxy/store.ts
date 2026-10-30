@@ -152,6 +152,32 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
     async down (k) {
       await k.schema.dropTable('request_vaults')
     }
+  },
+  '004_audit_log': {
+    async up (k) {
+      // Hash-chained, append-only audit log (src/audit/log.ts).
+      await k.schema.createTable('audit_log', t => {
+        t.integer('seq').primary()
+        t.bigInteger('at').notNullable()
+        t.string('actor').notNullable()
+        t.string('type').notNullable()
+        t.text('data').notNullable()
+        t.string('prev_hash').notNullable()
+        t.string('hash').notNullable()
+      })
+      // On-chain anchors of the log head, made by the company's own wallet.
+      await k.schema.createTable('audit_anchors', t => {
+        t.string('txid').primary()
+        t.integer('seq').notNullable()
+        t.string('hash').notNullable()
+        t.bigInteger('at').notNullable()
+        t.index(['seq'])
+      })
+    },
+    async down (k) {
+      await k.schema.dropTable('audit_anchors')
+      await k.schema.dropTable('audit_log')
+    }
   }
 }
 
@@ -291,11 +317,24 @@ export class ProxyStore {
   }
 
   /** Marks pending and approved requests that waited too long as expired. */
-  async expireStale (nowMs: number, ttl: { pendingMs: number, approvedMs: number }): Promise<void> {
-    await this.db('requests').where({ status: 'pending' }).where('created_at', '<', nowMs - ttl.pendingMs)
-      .update({ status: 'expired', reason: 'no decision in time', decided_at: nowMs, decided_by: 'system' })
-    await this.db('requests').where({ status: 'approved' }).where('decided_at', '<', nowMs - ttl.approvedMs)
-      .update({ status: 'expired', reason: 'approved but not executed in time', decided_by: 'system' })
+  /** Marks pending and approved requests that waited too long as expired; returns which ones. */
+  async expireStale (nowMs: number, ttl: { pendingMs: number, approvedMs: number }): Promise<Array<{ id: string, agentId: string, was: 'pending' | 'approved' }>> {
+    return await this.db.transaction(async trx => {
+      const pending = await trx('requests').where({ status: 'pending' }).where('created_at', '<', nowMs - ttl.pendingMs).select('id', 'agent_id')
+      const approved = await trx('requests').where({ status: 'approved' }).where('decided_at', '<', nowMs - ttl.approvedMs).select('id', 'agent_id')
+      if (pending.length > 0) {
+        await trx('requests').whereIn('id', pending.map(r => r.id))
+          .update({ status: 'expired', reason: 'no decision in time', decided_at: nowMs, decided_by: 'system' })
+      }
+      if (approved.length > 0) {
+        await trx('requests').whereIn('id', approved.map(r => r.id))
+          .update({ status: 'expired', reason: 'approved but not executed in time', decided_by: 'system' })
+      }
+      return [
+        ...pending.map(r => ({ id: r.id as string, agentId: r.agent_id as string, was: 'pending' as const })),
+        ...approved.map(r => ({ id: r.id as string, agentId: r.agent_id as string, was: 'approved' as const }))
+      ]
+    })
   }
 }
 
