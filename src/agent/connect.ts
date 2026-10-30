@@ -1,12 +1,14 @@
 /**
  * `npm run connect <code> [--proxy https://…]`: exchanges a one-time
- * connection code for the agent's settings, saves them (agent-config.json,
- * mode 0600), creates or loads the agent's own signing key and registers its
- * public key with the proxy. The API key is never printed.
+ * connection code for the agent's settings and saves them in the agent's
+ * profile (MCP_DATA_DIR/agents/<agentId>/agent-config.json, mode 0600), creates
+ * or loads that profile's own signing key and registers its public key with
+ * the proxy. The API key is never printed.
  */
 import { fingerprint } from '../shared/fingerprint.js'
 import type { Merchant } from '../proxy/connect.js'
 import { writeAgentConfig } from './config.js'
+import { ensureProfileDir } from './profiles.js'
 import { loadOrCreateAgentKey, registerAgentKey } from './keys.js'
 import { ProxyClient } from './proxy-client.js'
 
@@ -45,6 +47,8 @@ export function parseConnectArgs (argv: string[], env: NodeJS.ProcessEnv): Conne
 export interface ConnectResult {
   agentId: string
   proxyUrl: string
+  /** The agent's profile directory. */
+  profileDir: string
   configPath: string
   fingerprint: string
   registration: 'registered' | 'already_open'
@@ -71,14 +75,16 @@ export async function connectAgent (target: ConnectTarget, dataDir: string, fetc
 
   // Saved before anything else: the code is used up now, and the key it returned must not be lost.
   // The proxy URL is the one that just answered, not one taken from the answer.
-  const configPath = await writeAgentConfig(dataDir, {
+  // Each agent gets its own profile, so its signing key is never another agent's.
+  const dir = await ensureProfileDir(dataDir, body.agentId)
+  const configPath = await writeAgentConfig(dir, {
     proxyUrl: target.proxyUrl,
     agentId: body.agentId,
     apiKey: body.apiKey,
     merchants: body.merchants ?? [],
     connectedAt: new Date().toISOString()
   })
-  const key = await loadOrCreateAgentKey(dataDir)
+  const key = await loadOrCreateAgentKey(dir)
   const registration = await registerAgentKey(new ProxyClient({ proxyUrl: target.proxyUrl, apiKey: body.apiKey, fetch: fetchFn }), key.publicKey)
-  return { agentId: body.agentId, proxyUrl: target.proxyUrl, configPath, fingerprint: fingerprint(key.publicKey), registration, merchants: body.merchants ?? [] }
+  return { agentId: body.agentId, proxyUrl: target.proxyUrl, profileDir: dir, configPath, fingerprint: fingerprint(key.publicKey), registration, merchants: body.merchants ?? [] }
 }

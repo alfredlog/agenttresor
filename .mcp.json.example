@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agenttresor": {
+      "type": "http",
+      "url": "http://127.0.0.1:5070/agents/<agentId>/mcp"
+    }
+  }
+}
