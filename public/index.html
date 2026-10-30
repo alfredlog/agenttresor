@@ -18,7 +18,8 @@
     .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 16px 0; }
     input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); min-width: 260px; }
     button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
-    button.approve { border-color: var(--ok); color: var(--ok); }
+    button.approve, a.approve { border-color: var(--ok); color: var(--ok); }
+    a.approve { display: inline-block; font: inherit; padding: 6px 12px; border: 1px solid var(--ok); border-radius: 6px; text-decoration: none; }
     button.deny { border-color: var(--bad); color: var(--bad); }
     .table { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; }
@@ -84,7 +85,7 @@
         : requests.map(r => `<tr>
             <td class="mono">${esc(r.requestId)}</td><td>${esc(r.agentName)}</td><td>${esc(r.purpose)}</td>
             <td class="url mono">${esc(r.method)} ${esc(r.url)}</td><td class="num">${esc(r.satoshis)}</td><td>${esc(time(r.createdAt))}</td>
-            <td><button class="approve" data-id="${esc(r.requestId)}" data-action="approve">Approve</button>
+            <td><a class="approve" href="vault.html?approve=${encodeURIComponent(r.requestId)}" title="Approving means funding this payment from your wallet">Approve and fund</a>
                 <button class="deny" data-id="${esc(r.requestId)}" data-action="deny">Deny</button></td></tr>`).join('')
       $('total').textContent = `· ${ledger.totalSats} sats on ${ledger.network === 'test' ? 'testnet' : 'mainnet'}`
       $('ledger').innerHTML = ledger.entries.length === 0

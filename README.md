@@ -18,28 +18,48 @@ npm run proxy          # spend-control proxy + dashboard on PROXY_PORT (default 
 npm run mcp:http       # the agent's MCP server over HTTP on MCP_PORT (default 5070)
 ```
 
-## How a payment works (non-custodial vault)
+## The three parties
 
-Each agent has one **vault UTXO**, funded by the company from its own wallet (BSV Desktop) and locked by
+| Party | Holds | Can do alone | Cannot do alone |
+|---|---|---|---|
+| **Company** (BSV Desktop) | the money, and the company key in its wallet | fund vaults; approve a payment by funding it; **reclaim** any unspent vault at any time | pay a merchant on the agent's behalf |
+| **Proxy** (spend control) | the policy key (`PROXY_ROOT_KEY`), no funds | price each request, apply the rules, keep the ledger, add the second signature | move a single satoshi (the policy key is never enough on its own) |
+| **Agent** (MCP server) | its own key (`mcp-data/agent-key.json`) | ask, check what it is asked to sign, sign | move funds without the proxy, or pay more than the price it checked itself |
+
+Every vault UTXO is locked by the same script, with derived keys (`[1, 'agenttresor vault']`, keyID `agent-<id>`):
 
 ```
-OP_IF   <agentPub> OP_CHECKSIGVERIFY <policyPub> OP_CHECKSIG
-OP_ELSE <companyPub> OP_CHECKSIG
+OP_IF   <agentPub> OP_CHECKSIGVERIFY <policyPub> OP_CHECKSIG     spend:   agent AND policy
+OP_ELSE <companyPub> OP_CHECKSIG                                 reclaim: company alone
 OP_ENDIF
 ```
 
-- **Spend** needs the agent AND the proxy's policy key: neither can move funds alone.
-- **Reclaim** needs only the company: it can always take the vault back.
-- Keys are derived (`[1, 'agenttresor vault']`, keyID `agent-<id>`): the company's in its wallet, the policy key
-  from `PROXY_ROOT_KEY`. The agent generates its own key and registers only the public key.
+## How a payment works
 
-Flow: the agent registers its key (`POST /v1/vault/agent-key`) → the company funds the vault on `/vault.html` →
-the agent calls `POST /v1/pay`. The proxy reads the merchant's BRC-121 price from an unpaid preflight, applies the
-rules and the vault balance (a hard on-chain cap), and answers `{ status: 'sign', unsignedTx, … }`: input = the vault,
-output 0 = the merchant's BRC-29 output, output 1 = change back to the vault. The agent checks it and signs
-(`src/agent/vault-signer.ts`), then `POST /v1/requests/:id/sign`. The proxy verifies the signature, adds the policy
-signature, broadcasts through Arcade and delivers the request to the merchant with the BRC-121 payment headers.
-The signature must come back within 20 s (merchants accept a payment for 30 s).
+The agent registers its public key (`POST /v1/vault/agent-key`), the company funds the agent's vault on
+`/vault.html`, then the agent calls `POST /v1/pay`. The proxy reads the merchant's BRC-121 price from an unpaid
+preflight and applies the rules. Three outcomes:
+
+- **Under the approval threshold**: paid from the **agent's vault**. The proxy answers `{ status: 'sign', unsignedTx, … }`
+  (input = the vault, output 0 = the merchant's BRC-29 output, output 1 = change back to the vault); the vault balance
+  is a hard on-chain cap.
+- **Above the threshold**: `pending`, and impossible until a human approves it **on chain**. Approving means funding:
+  the dashboard's *Approve and fund* opens `/vault.html?approve=R-…`, which shows purpose, merchant, price and fee, and
+  funds a one-off **request vault** with exactly price + fee from BSV Desktop (`approveAndFund`). The proxy checks it by
+  SPV, exact script and exact amount. The agent then calls `POST /v1/requests/:id/execute` and gets a 1-input,
+  1-output transaction: the whole request vault goes to the merchant's price and the fee; the agent's own vault is
+  not touched. If the price changed in any way, the request fails with nothing paid. The daily budget and the
+  per-payment maximum still apply at execute time. (BRC-121 payments expire after 30 s, so the company cannot sign the
+  payment itself in advance; it funds it instead.)
+- **Against the rules**: `denied`, nothing is built.
+
+Either way the agent checks the transaction against the price it read itself and signs (`src/agent/vault-signer.ts`),
+then `POST /v1/requests/:id/sign`. The proxy verifies the signature, adds the policy signature, broadcasts through
+Arcade and sends the request to the merchant with the BRC-121 payment headers. The signature must come back within
+20 s (merchants accept a payment for 30 s).
+
+A request vault that is never spent (price changed, denied at execute, expired after 24 h, or the company changed its
+mind) is listed under *Approved payments* on `/vault.html` and reclaimed by the company alone, like an agent vault.
 
 ## The AI agent (MCP server)
 
@@ -100,7 +120,8 @@ claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "
 - `src/proxy/` — spend-control proxy: agent API (`/v1/…`, Bearer `agt_…`), rules (`rules.ts`: allowed hosts, max per
   payment, daily budget, approval threshold), approvals, ledger in `./data/proxy.sqlite`. Admin API under `/admin`
   (Bearer `ADMIN_TOKEN`); dashboard at `/`, vault page at `/vault.html`
-- `src/company/vault-client.ts` — `fundVault` / `reclaimVault` against any BRC-100 wallet; `vault-page.ts` is the
+- `src/company/vault-client.ts` — `fundVault`, `approveAndFund`, `reclaimVault` / `reclaimRequestVault` against any
+  BRC-100 wallet; `vault-page.ts` is the
   browser script of `public/vault.html`, bundled by `npm run build:web` into `public/vault.js`
 - `src/agent/` — the agent side: `keys.ts` (its own key, `agent-key.json`), `proxy-client.ts`, `pay.ts` (price check,
   sign, retry once), `vault-signer.ts` (checks a payment before signing it)

@@ -37,8 +37,9 @@ export type PriceResult =
   | { status: 'free', response: MerchantAnswer }
   | { status: 'failed', reason: string }
 
-export const PENDING_MESSAGE = 'The payment is above the company\'s approval threshold and waits for a human decision. ' +
-  'Tell the user the request id; check it later with check_request. Do not ask for the same payment again.'
+export const PENDING_MESSAGE = 'The payment is above the company\'s approval threshold: it is impossible until the company ' +
+  'approves it by funding it from its own wallet. Tell the user the request id; check it later with check_request. ' +
+  'Do not ask for the same payment again.'
 
 const errorMessage = (err: unknown): string => err instanceof Error ? err.message : String(err)
 
