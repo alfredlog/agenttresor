@@ -44,5 +44,9 @@ export const UnlockingScript = sdk.UnlockingScript
 export type UnlockingScript = Sdk.UnlockingScript
 export const Utils = sdk.Utils
 export const WalletClient = sdk.WalletClient
+export const MerklePath = sdk.MerklePath
+export type MerklePath = Sdk.MerklePath
+export const WhatsOnChain = sdk.WhatsOnChain
+export type WhatsOnChain = Sdk.WhatsOnChain
 
-export type { ChainTracker, WalletInterface, WalletProtocol } from '@bsv/sdk'
+export type { AdmittanceInstructions, ChainTracker, LookupQuestion, WalletInterface, WalletProtocol } from '@bsv/sdk'

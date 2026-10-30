@@ -19,6 +19,8 @@
   },
   "dependencies": {
     "@bsv/402-pay": "0.3.3",
+    "@bsv/overlay": "2.6.4",
+    "@bsv/overlay-express": "2.7.4",
     "@bsv/sdk": "3.2.1",
     "@bsv/wallet-toolbox": "2.14.9",
     "@modelcontextprotocol/sdk": "1.32.2",
