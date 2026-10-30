@@ -55,6 +55,11 @@ export class ProxyClient {
     return await this.request('GET', '/v1/budget')
   }
 
+  /** The merchants this agent may pay: [{ name, url, catalogUrl }]. */
+  async services (): Promise<ProxyResponse> {
+    return await this.request('GET', '/v1/services')
+  }
+
   private async request (method: string, path: string, body?: unknown): Promise<ProxyResponse> {
     try {
       const res = await this.fetch(`${this.url}${path}`, {

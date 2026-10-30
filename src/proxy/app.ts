@@ -1,7 +1,8 @@
 /**
  * Spend-control proxy HTTP API.
  *   Agents (Authorization: Bearer agt_…): /v1/pay, /v1/requests/:id, /v1/requests/:id/execute,
- *     /v1/requests/:id/sign, /v1/budget, /v1/vault/agent-key
+ *     /v1/requests/:id/sign, /v1/budget, /v1/services, /v1/vault/agent-key
+ *   Onboarding (no auth, one-time code, rate-limited): POST /v1/connect; page /connect#AT-…
  *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults, audit log)
  *   Dashboard: / (public/index.html); vault funding page: /vault.html
  * Keys and tokens are never logged.
@@ -21,6 +22,7 @@ import { AuditLog } from '../audit/log.js'
 import { recordAnchor } from '../audit/anchors.js'
 import type { Notifier } from './notifier.js'
 import { DEFAULT_RULES, parseRules } from './rules.js'
+import { CONNECT_CODE_TTL_MS, findConnectCode, generateConnectCode, hashConnectCode, merchantsFor, normalizeConnectCode, RateLimiter } from './connect.js'
 import { ProxyError, SpendControl, type Outcome } from './service.js'
 import { ProxyStore, REQUEST_STATUSES, SPENT_STATUSES, type Agent, type PaymentRequestRecord, type RequestStatus } from './store.js'
 
@@ -36,6 +38,12 @@ export interface ProxyAppOptions {
   adminToken: string
   now?: () => number
   network?: BsvNetwork
+  /** The proxy's public URL (PROXY_PUBLIC_URL), for connection links; default: the request's own origin. */
+  publicUrl?: string
+  /** Behind a reverse proxy (TRUST_PROXY=1): take the client IP from X-Forwarded-For, for the rate limit. */
+  trustProxy?: boolean
+  /** Attempts at POST /v1/connect per IP (default 10 per 10 minutes). */
+  connectRateLimit?: { max: number, windowMs: number }
 }
 
 const PUBLIC_DIR = fileURLToPath(new URL('../../public', import.meta.url))
@@ -102,8 +110,9 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const now = opts.now ?? Date.now
   const store = new ProxyStore(opts.db)
   const audit = new AuditLog(opts.db, now)
+  const vaultStore = new VaultStore(opts.db)
   const vault = new VaultService({
-    store: new VaultStore(opts.db),
+    store: vaultStore,
     policy: new PolicyKeys(opts.policyRootKey),
     chainTracker: opts.chainTracker,
     broadcaster: opts.broadcaster,
@@ -112,14 +121,37 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   })
   const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now })
 
+  const connectLimiter = new RateLimiter(opts.connectRateLimit?.max ?? 10, opts.connectRateLimit?.windowMs ?? 10 * 60_000, now)
+
   const app = express()
   app.disable('x-powered-by')
+  if (opts.trustProxy === true) app.set('trust proxy', 1)
   app.use(express.static(PUBLIC_DIR))
   // Funding BEEFs carry the transaction's unconfirmed ancestry, so allow more than a plain request needs.
   app.use(express.json({ limit: '2mb' }))
 
   const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
     (req: Request, res: Response, next: NextFunction) => { fn(req, res).catch(next) }
+
+  const publicUrl = (req: Request): string => opts.publicUrl?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host') ?? 'localhost'}`
+
+  /**
+   * Issues a one-time connection code for an agent (inside the caller's
+   * transaction). Without an open vault the old API key is revoked at once;
+   * with one it keeps working until the code is used, so a running agent
+   * is not cut off before its replacement connects.
+   */
+  const issueConnectCode = async (trx: Knex.Transaction, agentId: string, req: Request): Promise<{ connectCode: string, connectUrl: string, expiresAt: string, oldKeyRevoked: boolean }> => {
+    const s = store.with(trx)
+    // Read through the transaction: the database has a single connection.
+    const vaultOpen = (await vaultStore.with(trx).getVault(agentId))?.status === 'open'
+    if (!vaultOpen) await s.replaceAgentKey(agentId, hashAgentKey(generateAgentKey()), '')
+    const code = generateConnectCode()
+    const expiresAt = now() + CONNECT_CODE_TTL_MS
+    await s.insertConnectCode(agentId, hashConnectCode(code), expiresAt, now())
+    await audit.with(trx).append('admin', 'agent.connect_code_issued', { agentId, expiresAt: iso(expiresAt), oldKeyRevoked: !vaultOpen })
+    return { connectCode: code, connectUrl: `${publicUrl(req)}/connect#${code}`, expiresAt: iso(expiresAt)!, oldKeyRevoked: !vaultOpen }
+  }
 
   const requireAgent = (req: Request, res: Response, next: NextFunction): void => {
     const unauthorized = (): void => { res.status(401).json({ error: 'missing or invalid agent key' }) }
@@ -169,6 +201,36 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     res.json(await control.budget(agentOf(res)))
   }))
 
+  // The merchants this agent may pay (from its allowed hosts), so the agent needs no merchant list of its own.
+  app.get('/v1/services', requireAgent, wrap(async (_req, res) => {
+    res.json({ merchants: merchantsFor((await store.getRules(agentOf(res).id)).allowedHosts) })
+  }))
+
+  // ── Onboarding: exchange a one-time connection code for the agent's API key ──
+  app.get('/connect', (_req, res) => { res.sendFile('connect.html', { root: PUBLIC_DIR }) })
+
+  app.post('/v1/connect', wrap(async (req, res) => {
+    const refused = (): void => { res.status(401).json({ error: 'invalid, expired or already used connection code' }) }
+    if (!connectLimiter.hit(req.ip ?? 'unknown')) { res.status(429).json({ error: 'too many attempts; try again later' }); return }
+    const code = normalizeConnectCode((req.body ?? {}).code)
+    if (code === undefined) { refused(); return }
+    const t = now()
+    const result = await store.transaction(async trx => {
+      const s = store.with(trx)
+      // Every active code is compared in constant time: a wrong, expired or used code costs the same as a right one.
+      const match = findConnectCode(await s.activeConnectCodes(t), hashConnectCode(code))
+      if (match === undefined || !await s.useConnectCode(match.codeHash, t)) return undefined
+      // The API key is minted now; before this, no one has ever seen a working key for this agent.
+      const apiKey = generateAgentKey()
+      await s.replaceAgentKey(match.agentId, hashAgentKey(apiKey), agentKeyHint(apiKey))
+      await audit.with(trx).append(`agent:${match.agentId}`, 'agent.connected', { agentId: match.agentId, keyHint: maskAgentKey(agentKeyHint(apiKey)) })
+      return { agentId: match.agentId, apiKey, rules: await s.getRules(match.agentId) }
+    })
+    if (result === undefined) { refused(); return }
+    // The only response that ever carries the agent's API key.
+    res.json({ agentId: result.agentId, apiKey: result.apiKey, proxyUrl: publicUrl(req), merchants: merchantsFor(result.rules.allowedHosts) })
+  }))
+
   // The agent generates its own key pair and registers only the public key.
   app.post('/v1/vault/agent-key', requireAgent, wrap(async (req, res) => {
     const { publicKey } = (req.body ?? {}) as Record<string, unknown>
@@ -185,15 +247,22 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     if (typeof name !== 'string' || name.trim() === '' || name.length > 100) { res.status(400).json({ error: 'name is required (max 100 characters)' }); return }
     const rules = rulesInput === undefined ? DEFAULT_RULES : parseRules(rulesInput)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
-    const apiKey = generateAgentKey()
-    const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: agentKeyHint(apiKey), createdAt: now() }
-    await store.transaction(async trx => {
-      await store.with(trx).createAgent(agent, hashAgentKey(apiKey), rules)
-      // The key itself is never logged, only its masked hint.
-      await audit.with(trx).append('admin', 'agent.created', { agentId: agent.id, name: agent.name, keyHint: maskAgentKey(agent.keyHint), rules })
+    // The agent starts with a key no one ever sees; its real key is minted when it connects with the code.
+    const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: '', createdAt: now() }
+    const code = await store.transaction(async trx => {
+      await store.with(trx).createAgent(agent, hashAgentKey(generateAgentKey()), rules)
+      await audit.with(trx).append('admin', 'agent.created', { agentId: agent.id, name: agent.name, rules })
+      return await issueConnectCode(trx, agent.id, req)
     })
-    // The only time the key is ever returned.
-    res.status(201).json({ id: agent.id, name: agent.name, apiKey, key: maskAgentKey(agent.keyHint), rules })
+    res.status(201).json({ id: agent.id, name: agent.name, rules, connectCode: code.connectCode, connectUrl: code.connectUrl, expiresAt: code.expiresAt })
+  }))
+
+  // A new one-time code, e.g. for an agent on a new machine or one whose code expired.
+  admin.post('/agents/:id/connect-code', wrap(async (req, res) => {
+    const agent = await store.getAgent(String(req.params.id))
+    if (agent === undefined) { res.status(404).json({ error: 'agent not found' }); return }
+    const code = await store.transaction(async trx => await issueConnectCode(trx, agent.id, req))
+    res.status(201).json({ id: agent.id, ...code })
   }))
 
   // Never the API key or its hash: only the masked hint. agentPub is the agent's public signing key
@@ -207,7 +276,9 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         return {
           id: a.id,
           name: a.name,
-          key: maskAgentKey(a.keyHint),
+          // No hint: the agent has not connected (or its key was revoked for a new code).
+          key: a.keyHint === '' ? null : maskAgentKey(a.keyHint),
+          connected: a.keyHint !== '',
           createdAt: iso(a.createdAt),
           rules: await store.getRules(a.id),
           vault: v === undefined

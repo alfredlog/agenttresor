@@ -41,8 +41,10 @@
     .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
     .rules { font-size: 12px; line-height: 1.6; }
     .fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; letter-spacing: .02em; }
-    #key-box { border-color: var(--warn); }
-    #key-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    #code-box { border-color: var(--ok); }
+    #code-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .code-big { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; font-weight: 700; letter-spacing: .08em; margin: 10px 0 4px; }
+    .expired { color: var(--bad); font-weight: 600; }
     .warn { color: var(--warn); font-weight: 600; }
     .hint { font-size: 13px; }
     .chain-ok { color: var(--ok); font-weight: 600; }
@@ -67,20 +69,23 @@
 
   <h2>Agents</h2>
   <div class="table"><table>
-    <thead><tr><th>Agent</th><th>API key</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
+    <thead><tr><th>Agent</th><th>Connection</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
     <tbody id="agents"><tr><td colspan="6" class="muted">Enter the admin token.</td></tr></tbody>
   </table></div>
 
-  <!-- The new API key is shown here once, never stored, and removed from the page on Close. -->
-  <div id="key-box" class="card" hidden>
-    <div><strong>API key for <span id="key-agent"></span></strong></div>
+  <!-- The one-time connection code is shown here, never stored, and removed from the page on Close. -->
+  <div id="code-box" class="card" hidden>
+    <div><strong>Connection code for <span id="code-agent"></span></strong></div>
+    <div id="code-value" class="code-big"></div>
+    <div id="code-countdown" class="muted"></div>
     <div class="actions">
-      <input id="key-value" readonly aria-label="New agent API key">
-      <button id="key-copy" class="primary">Copy</button>
-      <button id="key-close">Close</button>
+      <input id="code-command" readonly aria-label="Command to connect the agent">
+      <button id="code-copy" class="primary">Copy</button>
+      <button id="code-close">Close</button>
     </div>
-    <p class="warn">Copy it now into the agent's .env (AGENT_API_KEY). It will never be shown again.</p>
-    <p class="hint muted">Next step: on the agent's own machine, run <code>npm run mcp</code>. It creates the agent's signing key, registers it with the proxy and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same.</p>
+    <p class="hint muted">Next step: on the agent's own machine, in the agent's project folder, run this command. It saves the agent's
+      settings, creates its signing key and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on
+      <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same. The code works once.</p>
   </div>
 
   <div id="rules-box" class="card" hidden>
@@ -232,12 +237,12 @@
       ? '<tr><td colspan="6" class="muted">No agents yet: create one below.</td></tr>'
       : agents.map(a => `<tr>
           <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span></td>
-          <td class="mono">${esc(a.key)}</td>
+          <td>${a.connected ? `<span class="mono">${esc(a.key)}</span>` : '<span class="muted">not connected</span>'}</td>
           <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
           <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
             max ${esc(a.rules.maxPerPaymentSats)} · daily ${esc(a.rules.dailyBudgetSats)} · approval above ${esc(a.rules.approvalThresholdSats)} sats</td>
           <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}</td>
-          <td><button data-edit="${esc(a.id)}">Edit rules</button></td></tr>`).join('')
+          <td><button data-edit="${esc(a.id)}">Edit rules</button> <button data-code="${esc(a.id)}">New code</button></td></tr>`).join('')
   }
 
   async function refresh () {
@@ -271,11 +276,43 @@
     }
   }
 
-  // ── New agent: the key is shown once, then removed from the page ────────
-  function closeKeyBox () {
-    $('key-value').value = ''
-    $('key-agent').textContent = ''
-    $('key-box').hidden = true
+  // ── Connection codes: shown with a countdown, never stored, removed on Close ──
+  let codeTimer = null
+
+  function closeCodeBox () {
+    clearInterval(codeTimer)
+    $('code-value').textContent = ''
+    $('code-command').value = ''
+    $('code-agent').textContent = ''
+    $('code-countdown').textContent = ''
+    $('code-box').hidden = true
+  }
+
+  function showCode (agentLabel, issued) {
+    clearInterval(codeTimer)
+    const proxy = new URL(issued.connectUrl).origin
+    $('code-agent').textContent = agentLabel
+    $('code-value').textContent = issued.connectCode
+    // `--` hands --proxy to the script; without it npm would take --proxy as its own setting.
+    $('code-command').value = `npm run connect ${issued.connectCode} -- --proxy ${proxy}`
+    $('code-copy').disabled = false
+    $('code-box').hidden = false
+    const expires = Date.parse(issued.expiresAt)
+    const tick = () => {
+      const left = Math.max(0, Math.round((expires - Date.now()) / 1000))
+      if (left === 0) {
+        clearInterval(codeTimer)
+        $('code-countdown').className = 'expired'
+        $('code-countdown').textContent = 'Expired: use "New code" in the agents list.'
+        $('code-copy').disabled = true
+        return
+      }
+      $('code-countdown').className = 'muted'
+      $('code-countdown').textContent = `Valid for ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}, once.`
+    }
+    tick()
+    codeTimer = setInterval(tick, 1000)
+    $('code-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
 
   $('create').addEventListener('click', async ev => {
@@ -286,10 +323,7 @@
     btn.disabled = true
     try {
       const created = await api('/admin/agents', { method: 'POST', body: JSON.stringify({ name, rules: rulesFrom(form) }) })
-      $('key-agent').textContent = `${created.name} (${created.id})`
-      $('key-value').value = created.apiKey
-      $('key-box').hidden = false
-      $('key-value').select()
+      showCode(`${created.name} (${created.id})`, created)
       form.reset()
     } catch (err) {
       $('error').textContent = err.message
@@ -299,22 +333,40 @@
     await refresh()
   })
 
-  $('key-copy').addEventListener('click', async () => {
-    const input = $('key-value')
+  $('code-copy').addEventListener('click', async () => {
+    const input = $('code-command')
     try {
       await navigator.clipboard.writeText(input.value)
-      $('key-copy').textContent = 'Copied'
+      $('code-copy').textContent = 'Copied'
     } catch {
-      input.select() // no clipboard access (e.g. plain http): the key is selected for Ctrl/Cmd+C
+      input.select() // no clipboard access (e.g. plain http): the command is selected for Ctrl/Cmd+C
     }
-    setTimeout(() => { $('key-copy').textContent = 'Copy' }, 1500)
+    setTimeout(() => { $('code-copy').textContent = 'Copy' }, 1500)
   })
-  $('key-close').addEventListener('click', closeKeyBox)
+  $('code-close').addEventListener('click', closeCodeBox)
 
   // ── Edit rules ──────────────────────────────────────────────────────────
   let editing = null
 
-  $('agents').addEventListener('click', ev => {
+  $('agents').addEventListener('click', async ev => {
+    const codeBtn = ev.target.closest('button[data-code]')
+    if (codeBtn) {
+      const agent = agents.find(a => a.id === codeBtn.dataset.code)
+      if (!agent) return
+      // Without an open vault, a new code revokes the agent's current API key at once.
+      if (agent.connected && agent.vault.status !== 'open' &&
+        !confirm(`New code for ${agent.name}? Its current API key stops working now; the agent must connect again with the new code.`)) return
+      codeBtn.disabled = true
+      try {
+        showCode(`${agent.name} (${agent.id})`, await api(`/admin/agents/${encodeURIComponent(agent.id)}/connect-code`, { method: 'POST' }))
+      } catch (err) {
+        $('error').textContent = err.message
+      } finally {
+        codeBtn.disabled = false
+      }
+      await refresh()
+      return
+    }
     const btn = ev.target.closest('button[data-edit]')
     if (!btn) return
     const agent = agents.find(a => a.id === btn.dataset.edit)

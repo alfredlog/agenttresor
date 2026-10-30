@@ -21,13 +21,17 @@ export const SERVER_INSTRUCTIONS = [
 
 const MAX_TEXT = 20_000
 
+export const NOT_CONNECTED = 'Not connected. Ask your admin for a connection code and run: npm run connect <code>'
+
 export interface AgentToolsOptions {
-  payer: AgentPayer
-  client: ProxyClient
-  /** Merchant base URLs whose catalogs list_services reads. */
-  merchantUrls: string[]
+  payer?: AgentPayer
+  client?: ProxyClient
+  /** MERCHANT_URLS override: merchant base URLs whose catalogs list_services reads. Default: ask the proxy (GET /v1/services). */
+  merchantUrls?: string[]
   /** The agent's public signing key (its private key never leaves agent-key.json). */
-  agentPublicKey: string
+  agentPublicKey?: string
+  /** Set when the agent is not connected: every tool answers with this message. */
+  disconnected?: string
   version?: string
 }
 
@@ -79,8 +83,15 @@ const requestShape = {
 
 export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
   const server = new McpServer({ name: 'agenttresor-agent', version: opts.version ?? '0.1.0' }, { instructions: SERVER_INSTRUCTIONS })
-  const safe = (fn: () => Promise<ToolResult>): Promise<ToolResult> =>
-    fn().catch(err => reply(`Error: ${err instanceof Error ? err.message : String(err)}`, undefined, true))
+  // Not connected: the tools are listed as usual, so the model can explain what to do, but none of them works.
+  const safe = async (fn: () => Promise<ToolResult>): Promise<ToolResult> => {
+    if (opts.disconnected !== undefined) return reply(opts.disconnected, undefined, true)
+    return await fn().catch(err => reply(`Error: ${err instanceof Error ? err.message : String(err)}`, undefined, true))
+  }
+  const need = <T>(value: T | undefined): T => {
+    if (value === undefined) throw new Error(NOT_CONNECTED)
+    return value
+  }
 
   server.registerTool('show_agent_key', {
     title: 'Show agent key',
@@ -88,21 +99,31 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
       'The company compares the fingerprint with the one on its vault page before funding this agent; give it to the user when asked.',
     annotations: { readOnlyHint: true }
   }, async () => await safe(async () => {
-    const fp = fingerprint(opts.agentPublicKey)
-    return reply(`Agent key fingerprint: ${fp}. The company must see the same fingerprint on its vault page before funding.`, { fingerprint: fp, publicKey: opts.agentPublicKey })
+    const publicKey = need(opts.agentPublicKey)
+    const fp = fingerprint(publicKey)
+    return reply(`Agent key fingerprint: ${fp}. The company must see the same fingerprint on its vault page before funding.`, { fingerprint: fp, publicKey })
   }))
 
   server.registerTool('list_services', {
     title: 'List paid services',
-    description: 'Lists the services the configured merchants sell: name, category, method, URL and price in satoshis. ' +
-      'Use it to find which URL to call. Prices here are indicative; get_price gives the exact price of a request.',
+    description: 'Lists the services of the merchants the company allows this agent to pay: name, category, method, URL and ' +
+      'price in satoshis. Use it to find which URL to call. Prices here are indicative; get_price gives the exact price of a request.',
     annotations: { readOnlyHint: true, openWorldHint: true }
   }, async () => await safe(async () => {
-    if (opts.merchantUrls.length === 0) return reply('No merchants are configured (MERCHANT_URLS is empty).')
-    const merchants = await Promise.all(opts.merchantUrls.map(async base => {
-      const root = base.replace(/\/$/, '').replace(/\/api\/catalog$/, '')
+    let catalogs: string[]
+    if (opts.merchantUrls !== undefined && opts.merchantUrls.length > 0) {
+      catalogs = opts.merchantUrls.map(base => `${base.replace(/\/$/, '').replace(/\/api\/catalog$/, '')}/api/catalog`)
+    } else {
+      // The proxy knows which merchants the company allows this agent to pay.
+      const res = await need(opts.client).services()
+      if (res.status !== 200) return reply(`The proxy answered ${res.status}: ${String(res.body?.error ?? '')}`, undefined, true)
+      catalogs = (res.body.merchants as Array<{ catalogUrl: string }>).map(m => m.catalogUrl)
+    }
+    if (catalogs.length === 0) return reply('The company has not allowed any merchant for this agent yet.')
+    const merchants = await Promise.all(catalogs.map(async catalogUrl => {
+      const root = catalogUrl.replace(/\/api\/catalog$/, '')
       try {
-        const res = await fetch(`${root}/api/catalog`, { signal: AbortSignal.timeout(10_000) })
+        const res = await fetch(catalogUrl, { signal: AbortSignal.timeout(10_000) })
         if (!res.ok) return { merchant: root, error: `catalog answered ${res.status}` }
         const { items } = await res.json() as { items: Array<{ path: string, [k: string]: unknown }> }
         return { merchant: root, services: items.map(({ path, ...rest }) => ({ ...rest, url: `${root}${path}` })) }
@@ -119,7 +140,7 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
       'what was spent today, what remains, and the vault balance. Call it before paying.',
     annotations: { readOnlyHint: true }
   }, async () => await safe(async () => {
-    const res = await opts.client.budget()
+    const res = await need(opts.client).budget()
     if (res.status !== 200) return reply(`The proxy answered ${res.status}: ${String(res.body?.error ?? '')}`, undefined, true)
     const b = res.body
     return reply(`Remaining today: ${b.remainingTodaySats} of ${b.rules.dailyBudgetSats} sats; vault: ${b.vault.satoshis} sats (${b.vault.status}). ` +
@@ -152,7 +173,7 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
     },
     annotations: { openWorldHint: true }
   }, async ({ url, method, body, purpose, maxSats }) => await safe(async () =>
-    describePayResult(await opts.payer.payAndFetch({ url, method, body, purpose, maxSats }))))
+    describePayResult(await need(opts.payer).payAndFetch({ url, method, body, purpose, maxSats }))))
 
   server.registerTool('check_request', {
     title: 'Check request',
@@ -160,7 +181,7 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
       'from the funds the company set aside for it (the same price check and signing as pay_and_fetch) and returns the merchant\'s answer.',
     inputSchema: { requestId: z.string().regex(/^R-[0-9A-F]{10}$/).describe('The request id, e.g. R-3F9A1C2B7D') },
     annotations: { openWorldHint: true }
-  }, async ({ requestId }) => await safe(async () => describePayResult(await opts.payer.checkRequest(requestId))))
+  }, async ({ requestId }) => await safe(async () => describePayResult(await need(opts.payer).checkRequest(requestId))))
 
   return server
 }

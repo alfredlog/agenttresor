@@ -178,6 +178,22 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
       await k.schema.dropTable('audit_anchors')
       await k.schema.dropTable('audit_log')
     }
+  },
+  '005_connect_codes': {
+    async up (k) {
+      // One-time connection codes (src/proxy/connect.ts), stored as sha256 only.
+      await k.schema.createTable('connect_codes', t => {
+        t.string('code_hash').primary()
+        t.string('agent_id').notNullable().references('agents.id')
+        t.bigInteger('expires_at').notNullable()
+        t.bigInteger('used_at')
+        t.bigInteger('created_at').notNullable()
+        t.index(['agent_id'])
+      })
+    },
+    async down (k) {
+      await k.schema.dropTable('connect_codes')
+    }
   }
 }
 
@@ -270,6 +286,28 @@ export class ProxyStore {
   async findAgentByKeyHash (keyHash: string): Promise<Agent | undefined> {
     const row = await this.db('agents').where({ key_hash: keyHash }).first()
     return row === undefined ? undefined : toAgent(row)
+  }
+
+  /** Replaces the agent's API key (the old one stops working at once). */
+  async replaceAgentKey (agentId: string, keyHash: string, keyHint: string): Promise<void> {
+    await this.db('agents').where({ id: agentId }).update({ key_hash: keyHash, key_hint: keyHint })
+  }
+
+  /** A new connection code for the agent; its earlier unused codes are dropped. */
+  async insertConnectCode (agentId: string, codeHash: string, expiresAt: number, now: number): Promise<void> {
+    await this.db('connect_codes').where({ agent_id: agentId }).whereNull('used_at').delete()
+    await this.db('connect_codes').insert({ code_hash: codeHash, agent_id: agentId, expires_at: expiresAt, created_at: now })
+  }
+
+  /** Codes that can still be used. */
+  async activeConnectCodes (now: number): Promise<Array<{ codeHash: string, agentId: string }>> {
+    const rows = await this.db('connect_codes').whereNull('used_at').where('expires_at', '>', now).select('code_hash', 'agent_id')
+    return rows.map(r => ({ codeHash: r.code_hash, agentId: r.agent_id }))
+  }
+
+  /** Marks a code used; false if it was used (or dropped) in the meantime. */
+  async useConnectCode (codeHash: string, now: number): Promise<boolean> {
+    return await this.db('connect_codes').where({ code_hash: codeHash }).whereNull('used_at').update({ used_at: now }) === 1
   }
 
   async getAgent (id: string): Promise<Agent | undefined> {

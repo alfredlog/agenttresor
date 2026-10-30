@@ -10,6 +10,7 @@
   "scripts": {
     "merchant": "tsx src/merchant/server.ts",
     "proxy": "npm run build:web && tsx src/proxy/server.ts",
+    "connect": "tsx src/agent/connect-cli.ts",
     "mcp": "tsx src/mcp/main.ts",
     "mcp:http": "tsx src/mcp/main.ts --http",
     "audit:verify": "tsx src/audit/verify-cli.ts",

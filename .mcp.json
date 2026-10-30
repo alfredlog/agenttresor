@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agenttresor": {
+      "command": "npm",
+      "args": ["run", "--silent", "mcp"]
+    }
+  }
+}
