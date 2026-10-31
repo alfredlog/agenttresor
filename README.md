@@ -104,8 +104,8 @@ Arcade.
   change), and receive top-ups.
 - **What it cannot do:** it holds no vault key, so it cannot sign for any vault, move company or agent funds, or
   approve anything. It only ever writes the hash and seq that are already in the log.
-- **Worst case:** whoever steals `NOTARY_ROOT_KEY` gets its balance, which is at most `NOTARY_MAX_SATS` (20,000 sats
-  by default). They could also write meaningless anchors, but the proxy records only anchors it made itself, and
+- **Worst case:** whoever steals `NOTARY_ROOT_KEY` gets its balance, which is at most `NOTARY_MAX_SATS` (1,000,000 sats,
+  0.01 BSV, by default). They could also write meaningless anchors, but the proxy records only anchors it made itself, and
   verifying checks every recorded anchor against the log.
 - **Top-up:** the dashboard shows the balance and has a *Top up notary from BSV Desktop* button. You choose the amount;
   it is capped so that the balance stays at or below `NOTARY_MAX_SATS`.

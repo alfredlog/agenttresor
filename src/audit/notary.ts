@@ -25,13 +25,13 @@ export interface NotaryConfig {
   intervalMs: number
   /** Alert when fewer anchors than this are left (NOTARY_LOW_ANCHORS, default 20). */
   lowAnchors: number
-  /** The notary never holds more than this (NOTARY_MAX_SATS, default 20000). */
+  /** The notary never holds more than this (NOTARY_MAX_SATS, default 1000000). */
   maxSats: number
   /** Cost of one anchor until the notary has made some (default 30 sats). */
   defaultAnchorCostSats: number
 }
 
-export const DEFAULT_NOTARY_CONFIG: NotaryConfig = { idleMs: 120_000, intervalMs: 30_000, lowAnchors: 20, maxSats: 20_000, defaultAnchorCostSats: 30 }
+export const DEFAULT_NOTARY_CONFIG: NotaryConfig = { idleMs: 120_000, intervalMs: 30_000, lowAnchors: 20, maxSats: 1_000_000, defaultAnchorCostSats: 30 }
 
 /** How many of the newest notary anchors the cost estimate averages. */
 const COST_SAMPLE = 10

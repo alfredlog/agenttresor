@@ -3,7 +3,7 @@
  * Env: PROXY_ROOT_KEY (64 hex chars), ADMIN_TOKEN (>= 16 chars), PROXY_PORT (default 5050), BSV_NETWORK,
  * PROXY_PUBLIC_URL (e.g. https://agentpay.example, for connection links), TRUST_PROXY=1 behind a reverse proxy.
  * Anchoring: AUTO_ANCHOR_PAYMENTS (default true), AUTO_ANCHOR_NOTARY (default true), NOTARY_ROOT_KEY
- * (64 hex chars; missing = no notary), ANCHOR_IDLE_MS (120000), NOTARY_LOW_ANCHORS (20), NOTARY_MAX_SATS (20000).
+ * (64 hex chars; missing = no notary), ANCHOR_IDLE_MS (120000), NOTARY_LOW_ANCHORS (20), NOTARY_MAX_SATS (1000000).
  *
  * The proxy holds no company funds. PROXY_ROOT_KEY only derives the policy key
  * of each vault (one of the two keys a payment needs) and the proxy's identity
@@ -77,7 +77,7 @@ const app = createProxyApp({
         config: {
           idleMs: positiveInt('ANCHOR_IDLE_MS', 120_000),
           lowAnchors: positiveInt('NOTARY_LOW_ANCHORS', 20),
-          maxSats: positiveInt('NOTARY_MAX_SATS', 20_000)
+          maxSats: positiveInt('NOTARY_MAX_SATS', 1_000_000)
         }
       }
 })

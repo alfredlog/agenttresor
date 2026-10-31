@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { P2PKH, PublicKey, Random, Transaction, Utils } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { parseAnchorScript } from '../src/audit/anchor-script'
-import type { NotaryAlert } from '../src/audit/notary'
+import { DEFAULT_NOTARY_CONFIG, type NotaryAlert } from '../src/audit/notary'
 import { anchorAuditHead } from '../src/company/audit-client'
 import { topUpNotary } from '../src/company/notary-client'
 import { createMerchantApp, REPORT_PRICE_SATS } from '../src/merchant/app'
@@ -49,7 +49,7 @@ describe('notary: out of funds, top-up, idle anchoring', () => {
   const holder: { wallet?: Wallet } = {}
 
   beforeAll(async () => {
-    h = await createProxyHarness({ notifier: spy, notary: { wallet: makeNotaryWallet(holder), config: { idleMs: IDLE_MS }, log: m => logs.push(m) } })
+    h = await createProxyHarness({ notifier: spy, notary: { wallet: makeNotaryWallet(holder), config: { idleMs: IDLE_MS, maxSats: 20_000 }, log: m => logs.push(m) } })
   })
   afterAll(async () => { await h?.close() })
 
@@ -223,8 +223,9 @@ describe('low-balance alert', () => {
   afterAll(async () => { await h?.close() })
 
   it('crossing below NOTARY_LOW_ANCHORS notifies once; topping up clears the banner', async () => {
-    // A new notary holds nothing: that is the red level, alerted on the first check.
-    expect(await status(h)).toMatchObject({ level: 'empty', balanceSats: 0 })
+    // A new notary holds nothing: that is the red level, alerted on the first check. Default cap: 1,000,000 sats.
+    expect(DEFAULT_NOTARY_CONFIG.maxSats).toBe(1_000_000)
+    expect(await status(h)).toMatchObject({ level: 'empty', balanceSats: 0, maxSats: 1_000_000, topUpRoomSats: 1_000_000 })
     expect(spy.alerts.map(a => a.level)).toEqual(['empty'])
 
     // 20½ anchors' worth: ok again, no new alert.
