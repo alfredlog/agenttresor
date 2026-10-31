@@ -72,13 +72,68 @@ Every decision and payment is appended to a hash-chained log in `./data/proxy.sq
 `hash = sha256(prev_hash + canonical JSON {seq, at, actor, type, data})`, starting from 64 zeros, keys sorted at every
 level. Entries: agent created, rules changed, agent key registered (with its fingerprint), request created / decided /
 paid / paid_not_delivered / failed / expired, vault funded / payment / reclaimed, request vault funded / reclaimed,
-anchor recorded. `actor` is `rules`, `admin`, `agent:<id>` or `company`. API keys appear only as masked hints, and
-the log refuses anything that looks like a key or token.
+anchor recorded, notary topped up / low balance. `actor` is `rules`, `admin`, `agent:<id>`, `company`, `proxy` (an
+anchor inside a payment) or `notary`. API keys appear only as masked hints, and the log refuses anything that looks like
+a key or token.
 
 Editing, removing or reordering a past entry breaks the chain. To also catch a chain rewritten with recomputed hashes,
-the company anchors the head on BSV from its own wallet (dashboard: *Anchor now with BSV Desktop*,
-`src/company/audit-client.ts`): one 0-sat output `OP_FALSE OP_RETURN "agenttresor-audit" <hash> <seq>`. The proxy pays
-nothing; it checks the transaction by SPV and that the hash is the one at that seq, then records the anchor.
+the head is anchored on BSV: one 0-sat output `OP_FALSE OP_RETURN "agenttresor-audit" <hash> <seq>`. Anchors come from
+three places, and the dashboard shows which one made each (*By*):
+
+- **A — in payments (automatic).** Every vault payment the proxy builds ends with that 0-sat anchor output for the log
+  head at the moment the payment is built. Once the payment is broadcast the anchor is recorded (source `payment`).
+  It costs a few satoshis of fee from the vault that pays anyway. The agent's signer checks it: it signs only if the
+  extra output is exactly one 0-sat AgentTresor anchor, last. `AUTO_ANCHOR_PAYMENTS=false` turns this off. **Update the
+  agents before the proxy:** an older agent refuses to sign a payment with the extra output.
+- **B — the notary, when idle (automatic).** The entries a payment writes after its own anchor, and everything that
+  happens without payments (agents created, rules changed, approvals), would stay unanchored. Every 30 s the proxy
+  checks three things. Are there unanchored entries? Is the newest one older than `ANCHOR_IDLE_MS` (2 minutes)? Is no
+  vault payment being built? (A payment that is being built will carry its own anchor.) If all three hold, the notary
+  anchors the current head (source `notary`). One anchor is in flight at a time.
+- **Manual.** *Anchor now with BSV Desktop* on the dashboard (`src/company/audit-client.ts`) anchors from the
+  company's wallet whenever you like. The proxy checks the transaction by SPV, and checks that the hash is the one at
+  that seq, then records the anchor (source `company`).
+
+### The notary wallet
+
+The notary is the **operator's own small fee wallet**, never company funds. It is a wallet-toolbox wallet
+(`openServerWallet`) with its own key `NOTARY_ROOT_KEY`, stored in `./data/notary-wallet.sqlite`. It broadcasts through
+Arcade.
+
+- **What it can do:** create anchor transactions (one 0-sat OP_RETURN output; the wallet adds its own fee input and
+  change), and receive top-ups.
+- **What it cannot do:** it holds no vault key, so it cannot sign for any vault, move company or agent funds, or
+  approve anything. It only ever writes the hash and seq that are already in the log.
+- **Worst case:** whoever steals `NOTARY_ROOT_KEY` gets its balance, which is at most `NOTARY_MAX_SATS` (20,000 sats
+  by default). They could also write meaningless anchors, but the proxy records only anchors it made itself, and
+  verifying checks every recorded anchor against the log.
+- **Top-up:** the dashboard shows the balance and has a *Top up notary from BSV Desktop* button. You choose the amount;
+  it is capped so that the balance stays at or below `NOTARY_MAX_SATS`.
+  - It is a BRC-29 payment to the notary's identity key: the company wallet derives the key with `forSelf: false`.
+  - The proxy verifies the transaction by SPV, checks that the output is locked to the notary's own derived key, and
+    internalizes it as a `'wallet payment'`.
+  - It pays anchoring fees only.
+- **Low balance:** remaining anchors ≈ balance / the average fee of the notary's last 10 anchors (30 sats until it has
+  made some).
+  - **Orange banner** when fewer than `NOTARY_LOW_ANCHORS` (20) are left: *Notary: about N anchors left — top up
+    from BSV Desktop*, with the top-up button.
+  - **Red banner** when none are left, or when an anchor failed for lack of funds.
+  - On each crossing the proxy calls the Notifier's `lowNotaryBalance` (so a Telegram notifier can forward it) and
+    writes one `notary.low_balance` audit entry. These happen once per crossing, not on every check. A top-up
+    re-arms the alert.
+  - When out of funds, the proxy logs it once and keeps running: payments and the manual button still anchor.
+- **Off switches:** without `NOTARY_ROOT_KEY` the notary is disabled, logged at start and shown on the dashboard;
+  `AUTO_ANCHOR_NOTARY=false` turns it off too.
+
+```bash
+# .env on the proxy host: a fresh key just for the notary (never reuse PROXY_ROOT_KEY)
+NOTARY_ROOT_KEY=$(openssl rand -hex 32)
+```
+
+- `GET /admin/notary` — `{enabled, identityKey, balanceSats, anchorsLeft, avgAnchorCostSats, level, outOfFunds,
+  topUpRoomSats, maxSats, banner}` (or `{enabled: false, reason}`)
+- `POST /admin/notary/topup` — `{beef, outputIndex, derivationPrefix, derivationSuffix, senderIdentityKey}` (the
+  dashboard sends it; `src/company/notary-client.ts`)
 
 - `GET /admin/audit?after=&limit=` — entries and anchors (with WhatsOnChain links)
 - `GET /admin/audit/head` — `{seq, hash, unanchoredEntries, latestAnchorSeq, chainShorterThanAnchor}`
@@ -99,8 +154,11 @@ the change is rolled back too.
   to an older entry: use *Verify full chain* or `npm run audit:verify` for that. The verified mark lives in memory, so
   the first check after a restart is a full one.
 - **Only anchored entries are protected against deletion.** Deleting entries up to an anchor is reported (the log is
-  shorter than the anchor), but entries after the latest anchor can be removed without trace. The dashboard shows how
-  many are not anchored yet: anchor often.
+  shorter than the anchor), but entries after the latest anchor can be removed without trace. Payments and the notary
+  keep this window short (at most `ANCHOR_IDLE_MS` plus 30 s while the notary has funds); the dashboard shows how many
+  entries are not anchored yet.
+- **A payment anchors the head as it was when the payment was built,** not the entries the payment itself writes
+  (they contain its txid, so they cannot be inside it). The notary picks those up once the log is idle.
 - **One proxy process per database.** Appends, the per-agent locks and the verified mark are per process.
 
 ## Connect an agent in 30 seconds
@@ -271,6 +329,7 @@ a reverse proxy, so the rate limit on `POST /v1/connect` (10 attempts per IP per
 - `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
 - `src/audit/` — the hash-chained audit log, the OP_RETURN anchor script, anchor checks, `audit:verify`
 - `src/company/audit-client.ts` — `anchorAuditHead` against any BRC-100 wallet (`public/audit.js` in the browser)
+- `src/audit/notary.ts` — the notary: idle anchoring, top-ups, low-balance alert; `src/company/notary-client.ts` tops it up
 - `src/shared/fingerprint.ts` — agent key fingerprint, shared by the agent, the dashboard (`public/fingerprint.js`)
   and the vault page
 - `test/helpers/` — offline mock chain, test wallets and a proxy harness

@@ -2,7 +2,7 @@
  * Bundles the browser scripts: `npm run build:web` →
  *   public/vault.js        the vault page (fund, approve, reclaim from BSV Desktop)
  *   public/fingerprint.js  the agent key fingerprint, for the dashboard
- *   public/audit.js        "Anchor now with BSV Desktop" on the dashboard (loaded on demand)
+ *   public/audit.js        "Anchor now" and "Top up notary" with BSV Desktop on the dashboard (loaded on demand)
  * src/shared/bsv.ts loads the SDK with createRequire (Node only); in the bundle
  * it is replaced by src/shared/bsv.browser.ts, which re-exports the ESM build.
  */

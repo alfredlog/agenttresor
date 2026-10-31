@@ -6,15 +6,20 @@
  * A payment needs two signatures: the agent signs on its side (it never sends
  * its key), then the proxy adds the policy signature and broadcasts. The
  * proxy alone cannot move funds; the company alone can always reclaim.
+ *
+ * Each payment also carries a 0-sat OP_RETURN anchoring the audit log head as
+ * it was when the payment was built (option A); once broadcast, that anchor is
+ * recorded with source 'payment'.
  */
 import { Beef, LockingScript, P2PKH, Random, Transaction, Utils, type ChainTracker } from '../shared/bsv.js'
 import type { PaymentHeaders } from '../shared/brc121.js'
 import { fingerprint } from '../shared/fingerprint.js'
 import type { Knex } from 'knex'
+import { anchorLockingScript, parseAnchorScript } from '../audit/anchor-script.js'
 import type { AuditLog } from '../audit/log.js'
 import { ProxyError } from '../proxy/errors.js'
 import type { Broadcaster } from './broadcaster.js'
-import { buildRequestVaultPayment, buildVaultPayment, requestVaultFee, type VaultOutpoint } from './builder.js'
+import { buildRequestVaultPayment, buildVaultPayment, PLACEHOLDER_ANCHOR, requestVaultFee, type VaultOutpoint } from './builder.js'
 import type { PolicyKeys } from './keys.js'
 import { VAULT_PROTOCOL, vaultKeyId } from './protocol.js'
 import { signatureFromDerHex, signVaultInput, spendUnlockingScript, vaultLockingScript, verifyVaultSignature } from './script.js'
@@ -50,6 +55,8 @@ export interface VaultServiceOptions {
   /** Every funding, payment and reclaim is recorded here. */
   audit: AuditLog
   now: () => number
+  /** Put an anchor of the audit log head into every payment (default true; agents older than this refuse to sign it). */
+  anchorPayments?: boolean
 }
 
 const isCompressedPubHex = (v: unknown): v is string => typeof v === 'string' && /^0[23][0-9a-f]{64}$/.test(v)
@@ -98,6 +105,7 @@ export class VaultService {
   private readonly broadcaster: Broadcaster
   private readonly audit: AuditLog
   private readonly now: () => number
+  private readonly anchorPayments: boolean
 
   constructor (opts: VaultServiceOptions) {
     this.store = opts.store
@@ -106,6 +114,7 @@ export class VaultService {
     this.broadcaster = opts.broadcaster
     this.audit = opts.audit
     this.now = opts.now
+    this.anchorPayments = opts.anchorPayments ?? true
   }
 
   get senderIdentityKey (): string {
@@ -294,7 +303,7 @@ export class VaultService {
   async capacityProblem (agentId: string, sats: number): Promise<string | undefined> {
     const vault = await this.store.getVault(agentId)
     if (vault?.status !== 'open') return 'the agent has no funded vault'
-    const { feeSats, changeSats } = await buildVaultPayment(outpointOf(vault), sats)
+    const { feeSats, changeSats } = await buildVaultPayment(outpointOf(vault), sats, undefined, this.anchorPayments ? PLACEHOLDER_ANCHOR : undefined)
     // At least 1 sat stays in the vault, so it always has an output to spend next.
     if (changeSats < 1) return `vault balance too low: ${sats} + ${feeSats} fee needs more than the ${vault.satoshis!} sats in the vault`
     return undefined
@@ -314,6 +323,11 @@ export class VaultService {
     return live
   }
 
+  /** Whether a payment of any agent was built and is still waiting for its signature (it will anchor the log itself). */
+  async paymentInFlight (): Promise<boolean> {
+    return await this.store.anyAwaitingSignatureSince(this.now() - SIGN_WINDOW_MS)
+  }
+
   /** Builds the payment of `sats` to the merchant `serverKey` and keeps it until the agent signs. */
   async prepare (agentId: string, requestId: string, sats: number, serverKey: string): Promise<SignRequest> {
     if (await this.inFlight(agentId) !== undefined) throw new ProxyError(409, 'a vault payment is already waiting for a signature', { code: 'SIGNATURE_PENDING' })
@@ -321,7 +335,7 @@ export class VaultService {
 
     const now = this.now()
     const { nonce, time, merchantScript } = this.merchantOutput(serverKey, now)
-    const { tx, feeSats, changeSats } = await buildVaultPayment(outpointOf(vault), sats, merchantScript)
+    const { tx, feeSats, changeSats } = await buildVaultPayment(outpointOf(vault), sats, merchantScript, await this.headAnchor())
     if (changeSats < 1) throw new ProxyError(403, `vault balance too low: ${sats} + ${feeSats} fee needs more than the ${vault.satoshis!} sats in the vault`)
 
     const unsignedTx = tx.toHex()
@@ -358,7 +372,7 @@ export class VaultService {
     const rv = await this.openRequestVault(requestId)
     const now = this.now()
     const { nonce, time, merchantScript } = this.merchantOutput(serverKey, now)
-    const { tx, feeSats } = buildRequestVaultPayment({ txid: rv.txid, vout: rv.vout, satoshis: rv.satoshis, lockingScript: rv.lockingScript }, sats, merchantScript)
+    const { tx, feeSats } = buildRequestVaultPayment({ txid: rv.txid, vout: rv.vout, satoshis: rv.satoshis, lockingScript: rv.lockingScript }, sats, merchantScript, await this.headAnchor())
     if (feeSats < 1) throw new ProxyError(409, `the request vault holds ${rv.satoshis} sats, not enough for ${sats} plus a fee`)
 
     const unsignedTx = tx.toHex()
@@ -450,6 +464,12 @@ export class VaultService {
         await store.updateVault(agentId, { txid, vout: 1, satoshis: attempt.changeSats!, beefHex: beef.toHex(), updatedAt: now })
       }
       if (alsoInTransaction !== undefined) await alsoInTransaction(trx, { txid, priceSats: attempt.priceSats! })
+      // The anchor rode along in this payment: record it like any other (the entry it names cannot have changed).
+      const anchored = tx.outputs.map(o => parseAnchorScript(o.lockingScript)).find(a => a !== undefined)
+      if (anchored !== undefined && (await audit.get(anchored.seq))?.hash === anchored.hash) {
+        await audit.addAnchor({ ...anchored, txid, at: now, source: 'payment', feeSats: null })
+        await audit.append('proxy', 'audit.anchor_recorded', { ...anchored, txid, source: 'payment' })
+      }
     })
     return {
       txid,
@@ -477,6 +497,13 @@ export class VaultService {
   private async inTransaction<T> (fn: (store: VaultStore, audit: AuditLog, trx: Knex.Transaction) => Promise<T>, trx?: Knex.Transaction): Promise<T> {
     if (trx !== undefined) return await fn(this.store.with(trx), this.audit.with(trx), trx)
     return await this.store.transaction(async t => await fn(this.store.with(t), this.audit.with(t), t))
+  }
+
+  /** The anchor output for the current audit log head, or undefined if payments do not anchor (or the log is empty). */
+  private async headAnchor (): Promise<LockingScript | undefined> {
+    if (!this.anchorPayments) return undefined
+    const head = await this.audit.head()
+    return head.seq < 1 ? undefined : anchorLockingScript(head.hash, head.seq)
   }
 
   /** The UTXO this request's payment spends: its open request vault if it has one, else the agent's open vault. */

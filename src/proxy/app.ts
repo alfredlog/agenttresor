@@ -3,7 +3,7 @@
  *   Agents (Authorization: Bearer agt_…): /v1/pay, /v1/requests/:id, /v1/requests/:id/execute,
  *     /v1/requests/:id/sign, /v1/budget, /v1/services, /v1/vault/agent-key
  *   Onboarding (no auth, one-time code, rate-limited): POST /v1/connect; page /connect#AT-…
- *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults, audit log)
+ *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults, audit log, notary)
  *   Dashboard: / (public/index.html); vault funding page: /vault.html
  * Keys and tokens are never logged.
  */
@@ -13,13 +13,14 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import type { Knex } from 'knex'
 import { getNetwork, txLink, type BsvNetwork } from '../shared/network.js'
 import { agentKeyHint, generateAgentKey, hashAgentKey, isAgentKey, maskAgentKey } from './keys.js'
-import type { ChainTracker, PrivateKey } from '../shared/bsv.js'
+import type { ChainTracker, PrivateKey, WalletInterface } from '../shared/bsv.js'
 import type { Broadcaster } from '../vault/broadcaster.js'
 import { PolicyKeys } from '../vault/keys.js'
 import { VaultService } from '../vault/service.js'
 import { VaultStore } from '../vault/store.js'
 import { AuditLog } from '../audit/log.js'
 import { recordAnchor } from '../audit/anchors.js'
+import { alertMessage, Notary, type NotaryConfig } from '../audit/notary.js'
 import type { Notifier } from './notifier.js'
 import { DEFAULT_RULES, parseRules } from './rules.js'
 import { CONNECT_CODE_TTL_MS, findConnectCode, generateConnectCode, hashConnectCode, merchantsFor, normalizeConnectCode, RateLimiter } from './connect.js'
@@ -44,6 +45,17 @@ export interface ProxyAppOptions {
   trustProxy?: boolean
   /** Attempts at POST /v1/connect per IP (default 10 per 10 minutes). */
   connectRateLimit?: { max: number, windowMs: number }
+  /** Put an anchor of the audit log head into every vault payment (option A, default true). */
+  anchorPayments?: boolean
+  /** The operator's notary wallet (option B): anchors the log when it is idle. Without it there is no idle anchoring. */
+  notary?: { wallet: WalletInterface, identityKey: string, config?: Partial<NotaryConfig>, log?: (msg: string) => void }
+  /** Why there is no notary, shown on the dashboard (e.g. NOTARY_ROOT_KEY is not set). */
+  notaryDisabledReason?: string
+}
+
+/** The notary of an app made by createProxyApp, if it has one (the server starts its scheduler). */
+export function notaryOf (app: Express): Notary | undefined {
+  return app.locals.notary as Notary | undefined
 }
 
 const PUBLIC_DIR = fileURLToPath(new URL('../../public', import.meta.url))
@@ -117,13 +129,28 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     chainTracker: opts.chainTracker,
     broadcaster: opts.broadcaster,
     audit,
-    now
+    now,
+    anchorPayments: opts.anchorPayments ?? true
   })
   const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now })
+  const notary = opts.notary === undefined
+    ? undefined
+    : new Notary({
+      wallet: opts.notary.wallet,
+      identityKey: opts.notary.identityKey,
+      audit,
+      chainTracker: opts.chainTracker,
+      paymentInFlight: async () => await vault.paymentInFlight(),
+      notifier: opts.notifier,
+      now,
+      log: opts.notary.log,
+      config: opts.notary.config
+    })
 
   const connectLimiter = new RateLimiter(opts.connectRateLimit?.max ?? 10, opts.connectRateLimit?.windowMs ?? 10 * 60_000, now)
 
   const app = express()
+  app.locals.notary = notary
   app.disable('x-powered-by')
   if (opts.trustProxy === true) app.set('trust proxy', 1)
   app.use(express.static(PUBLIC_DIR))
@@ -457,8 +484,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   }))
 
   // ── Audit log (hash chain, anchored on BSV by the company's wallet) ─────
-  const anchorView = (a: { seq: number, hash: string, txid: string, at: number }): Record<string, unknown> =>
-    ({ seq: a.seq, hash: a.hash, txid: a.txid, at: iso(a.at), explorerUrl: txLink(a.txid, network) })
+  const anchorView = (a: { seq: number, hash: string, txid: string, at: number, source: string, feeSats: number | null }): Record<string, unknown> =>
+    ({ seq: a.seq, hash: a.hash, txid: a.txid, at: iso(a.at), source: a.source, feeSats: a.feeSats ?? undefined, explorerUrl: txLink(a.txid, network) })
 
   // The head, how many entries no anchor covers yet, and whether the log got shorter than an anchor (deleted tail).
   admin.get('/audit/head', wrap(async (_req, res) => {
@@ -488,6 +515,19 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   admin.post('/audit/anchors', wrap(async (req, res) => {
     const anchor = await recordAnchor(audit, opts.chainTracker, (req.body ?? {}) as Record<string, unknown>, now())
     res.status(201).json(anchorView(anchor))
+  }))
+
+  // ── Notary: the operator's fee wallet that anchors the log when it is idle ──
+  admin.get('/notary', wrap(async (_req, res) => {
+    if (notary === undefined) { res.json({ enabled: false, reason: opts.notaryDisabledReason ?? 'no notary wallet is configured' }); return }
+    const s = await notary.status()
+    res.json({ enabled: true, ...s, banner: s.level === 'ok' ? null : alertMessage(s.level, s.anchorsLeft) })
+  }))
+
+  admin.post('/notary/topup', wrap(async (req, res) => {
+    if (notary === undefined) throw new ProxyError(409, `the notary is disabled: ${opts.notaryDisabledReason ?? 'no notary wallet is configured'}`)
+    const r = await notary.acceptTopUp((req.body ?? {}) as Record<string, unknown>)
+    res.status(201).json({ ...r, explorerUrl: txLink(r.txid, network) })
   }))
 
   app.use('/admin', admin)

@@ -11,7 +11,8 @@ import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../../src/agent/vault-signer'
 import { fundVault } from '../../src/company/vault-client'
 import { fingerprint } from '../../src/shared/fingerprint'
-import { createProxyApp } from '../../src/proxy/app'
+import { createProxyApp, notaryOf } from '../../src/proxy/app'
+import type { Notary, NotaryConfig } from '../../src/audit/notary'
 import { DashboardNotifier, type Notifier } from '../../src/proxy/notifier'
 import { openProxyDb } from '../../src/proxy/store'
 import { createMockChain, type MockChain } from './mockchain'
@@ -34,6 +35,8 @@ export interface ProxyHarness {
   company: Wallet
   policyRootKey: PrivateKey
   url: string
+  /** The notary, if the harness was given a notary wallet (its scheduler is not started: tests call tick()). */
+  notary: Notary | undefined
   /** Shifts the proxy's clock (ms), e.g. to make a signature late. */
   clock: { offset: number }
   listen: (app: Express) => Promise<string>
@@ -51,7 +54,13 @@ export interface ProxyHarness {
   close: () => Promise<void>
 }
 
-export async function createProxyHarness (opts: { notifier?: Notifier } = {}): Promise<ProxyHarness> {
+export interface HarnessOptions {
+  notifier?: Notifier
+  /** A wallet (on this harness's mock chain: pass a function) to use as the notary. */
+  notary?: { wallet: (chain: MockChain) => Promise<Wallet>, config?: Partial<NotaryConfig>, log?: (msg: string) => void }
+}
+
+export async function createProxyHarness (opts: HarnessOptions = {}): Promise<ProxyHarness> {
   const chain = await createMockChain()
   const company = await chain.makeWallet()
   await chain.fund(company, 2_000_000)
@@ -64,7 +73,8 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     const s = app.listen(0, () => resolve(`http://localhost:${(s.address() as AddressInfo).port}`))
     servers.push(s)
   })
-  const url = await listen(createProxyApp({
+  const notaryWallet = opts.notary === undefined ? undefined : await opts.notary.wallet(chain)
+  const app = createProxyApp({
     db,
     policyRootKey,
     chainTracker: chain.chainTracker,
@@ -74,8 +84,12 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     network: 'test',
     now: () => Date.now() + clock.offset,
     // Every test connects from 127.0.0.1.
-    connectRateLimit: { max: 10_000, windowMs: 60_000 }
-  }))
+    connectRateLimit: { max: 10_000, windowMs: 60_000 },
+    notary: notaryWallet === undefined
+      ? undefined
+      : { wallet: notaryWallet, identityKey: notaryWallet.identityKey, config: opts.notary?.config, log: opts.notary?.log }
+  })
+  const url = await listen(app)
 
   const call = async (path: string, token: string | undefined, init: { method?: string, body?: unknown } = {}): Promise<Res> => {
     const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -117,6 +131,7 @@ export async function createProxyHarness (opts: { notifier?: Notifier } = {}): P
     company,
     policyRootKey,
     url,
+    notary: notaryOf(app),
     clock,
     listen,
     call,

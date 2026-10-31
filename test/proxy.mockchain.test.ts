@@ -34,6 +34,7 @@ class SpyNotifier implements Notifier {
   decisions: PaymentRequestRecord[] = []
   async approvalNeeded (req: PaymentRequestRecord): Promise<void> { this.approvals.push(req) }
   async decided (req: PaymentRequestRecord): Promise<void> { this.decisions.push(req) }
+  async lowNotaryBalance (): Promise<void> {}
 }
 const notifier = new SpyNotifier()
 

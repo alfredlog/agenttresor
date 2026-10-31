@@ -12,7 +12,7 @@ console.log(`audit log: ${file}`)
 console.log(`entries:   ${report.entries} (head #${report.head.seq} ${report.head.hash})`)
 console.log(report.ok ? 'chain:     valid' : `chain:     BROKEN at #${report.brokenAt}: ${report.reason}`)
 for (const a of report.anchors) {
-  console.log(`anchor:    #${a.seq} ${a.matches ? 'matches' : 'DOES NOT MATCH'} the log (tx ${a.txid})`)
+  console.log(`anchor:    #${a.seq} ${a.matches ? 'matches' : 'DOES NOT MATCH'} the log (tx ${a.txid}, by ${a.source})`)
 }
 if (report.anchors.length === 0) console.log('anchors:   none yet (anchor the head from the dashboard)')
 else if (report.head.unanchoredEntries > 0) console.log(`unanchored: ${report.head.unanchoredEntries} entries after the latest anchor (anchor again to cover them)`)

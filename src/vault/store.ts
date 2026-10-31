@@ -164,6 +164,11 @@ export class VaultStore {
     await this.db('vault_txs').where({ id }).update(toRow(patch))
   }
 
+  /** Whether any agent has a payment built since `since` and still waiting for its signature. */
+  async anyAwaitingSignatureSince (since: number): Promise<boolean> {
+    return await this.db('vault_txs').where({ status: 'awaiting_signature' }).where('created_at', '>=', since).first('id') !== undefined
+  }
+
   async awaitingSignature (agentId: string): Promise<VaultTx[]> {
     return (await this.db('vault_txs').where({ agent_id: agentId, status: 'awaiting_signature' })).map(toVaultTx)
   }
