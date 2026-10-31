@@ -26,7 +26,8 @@
     "build:web": "node scripts/build-web.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "overlay": "tsx src/token/overlay/server.ts"
+    "overlay": "tsx src/token/overlay/server.ts",
+    "token:issuer": "tsx src/token/issuer-cli.ts"
   },
   "dependencies": {
     "@bsv/402-pay": "0.3.3",

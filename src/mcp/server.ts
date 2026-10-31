@@ -6,7 +6,15 @@
  * src/agent/tools.ts, shared with the plain HTTP API.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { createAgentTools, payShape, requestIdShape, requestShape, type AgentToolsOptions, type ToolOutcome } from '../agent/tools.js'
+import {
+  createAgentTools,
+  payShape,
+  requestIdShape,
+  requestShape,
+  tokenAmountShape,
+  type AgentToolsOptions,
+  type ToolOutcome
+} from '../agent/tools.js'
 
 export { NOT_CONNECTED, type AgentToolsOptions } from '../agent/tools.js'
 
@@ -16,7 +24,8 @@ export const SERVER_INSTRUCTIONS = [
   'Give pay_and_fetch a real, specific purpose: it is stored in the company\'s audit log.',
   'Set maxSats to the most you are willing to pay; the payment is refused above it.',
   'If a payment is refused (denied), explain the reason to the user instead of retrying.',
-  'If it is pending, the company must approve it by funding it from its wallet: tell the user the request id and use check_request later.'
+  'If it is pending, the company must approve it by funding it from its wallet: tell the user the request id and use check_request later.',
+  'BSV-21 token transfers are separate on-chain transactions; only send tokens when the user explicitly asks.'
 ].join(' ')
 
 const MAX_TEXT = 20_000
@@ -54,6 +63,25 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
       'what was spent today, what remains, and the vault balance. Call it before paying.',
     annotations: { readOnlyHint: true }
   }, async () => reply(await tools.checkBudget()))
+
+  server.registerTool('check_token_balance', {
+    title: 'Check token balance',
+    description: 'Shows this agent’s BSV-21 token balance in the overlay and its local wallet basket. This is a token balance, not a satoshi balance.',
+    annotations: { readOnlyHint: true }
+  }, async () => reply(await tools.checkTokenBalance()))
+
+  server.registerTool('sync_token_wallet', {
+    title: 'Sync token wallet',
+    description: 'Synchronizes this agent’s local BSV-21 wallet with the overlay. It does not send or spend tokens.',
+    annotations: { readOnlyHint: false }
+  }, async () => reply(await tools.syncTokenWallet()))
+
+  server.registerTool('send_tokens_to_company', {
+    title: 'Send tokens to company',
+    description: 'Transfers BSV-21 tokens to the configured company identity. This creates an on-chain transaction. Use only when the user explicitly asks to transfer tokens.',
+    inputSchema: tokenAmountShape,
+    annotations: { readOnlyHint: false, destructiveHint: true }
+  }, async ({ amount }) => reply(await tools.sendTokensToCompany(amount)))
 
   server.registerTool('get_price', {
     title: 'Get price',

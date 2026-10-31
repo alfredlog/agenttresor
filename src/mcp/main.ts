@@ -31,6 +31,19 @@ else {
   dir = dataDir
 }
 
-const { createServer } = await setupAgent(dir, process.env, log)
-await createServer().connect(new StdioServerTransport())
+const agent = await setupAgent(dir, process.env, log)
+
+const shutdown = async (): Promise<void> => {
+  try {
+    await agent.close?.()
+  } catch (err) {
+    log(`could not close token wallet: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    process.exit(0)
+  }
+}
+process.once('SIGINT', () => { void shutdown() })
+process.once('SIGTERM', () => { void shutdown() })
+
+await agent.createServer().connect(new StdioServerTransport())
 log('MCP over stdio ready')

@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { getPrice, type AgentPayer, type PayResult } from './pay.js'
 import type { ProxyClient } from './proxy-client.js'
 import { fingerprint } from '../shared/fingerprint.js'
+import type { TokenKit } from '../token/token.js'
 
 export const NOT_CONNECTED = 'Not connected. Ask your admin for a connection code and run: npm run connect <code>'
 
@@ -21,6 +22,10 @@ export interface AgentToolsOptions {
   /** Set when the agent is not connected: every tool answers with this message. */
   disconnected?: string
   version?: string
+  /** BSV-21 wallet and configuration; private keys remain in the local wallet. */
+  tokenKit?: TokenKit
+  tokenId?: string
+  companyIdentityKey?: string
 }
 
 export interface ToolOutcome {
@@ -77,6 +82,9 @@ export const payShape = {
   maxSats: z.number().int().positive().describe('The most you are willing to pay for this request, in satoshis')
 }
 export const requestIdShape = { requestId: z.string().regex(/^R-[0-9A-F]{10}$/).describe('The request id, e.g. R-3F9A1C2B7D') }
+export const tokenAmountShape = {
+  amount: z.string().regex(/^[1-9][0-9]*$/).describe('Positive whole number of token units to transfer')
+}
 
 export type RequestInput = z.infer<z.ZodObject<typeof requestShape>>
 export type PayInput = z.infer<z.ZodObject<typeof payShape>>
@@ -88,6 +96,9 @@ export interface AgentTools {
   getPrice: (input: RequestInput) => Promise<ToolOutcome>
   payAndFetch: (input: PayInput) => Promise<ToolOutcome>
   checkRequest: (requestId: string) => Promise<ToolOutcome>
+  checkTokenBalance: () => Promise<ToolOutcome>
+  syncTokenWallet: () => Promise<ToolOutcome>
+  sendTokensToCompany: (amount: string) => Promise<ToolOutcome>
 }
 
 export function createAgentTools (opts: AgentToolsOptions): AgentTools {
@@ -153,6 +164,51 @@ export function createAgentTools (opts: AgentToolsOptions): AgentTools {
     payAndFetch: async ({ url, method, body, purpose, maxSats }) => await safe(async () =>
       describePayResult(await need(opts.payer).payAndFetch({ url, method, body, purpose, maxSats }))),
 
-    checkRequest: async requestId => await safe(async () => describePayResult(await need(opts.payer).checkRequest(requestId)))
+    checkRequest: async requestId => await safe(async () => describePayResult(await need(opts.payer).checkRequest(requestId))),
+
+    checkTokenBalance: async () => await safe(async () => {
+      const { tokenKit, tokenId } = opts
+      if (tokenKit === undefined || tokenId === undefined) {
+        return outcome('BSV-21 is not configured for this agent yet.')
+      }
+
+      const balance = (await tokenKit.balances()).find(item => item.tokenId === tokenId)
+      if (balance === undefined) {
+        return outcome('No balance found for the configured token.', { tokenId, overlay: '0', basket: '0' })
+      }
+
+      const data = {
+        tokenId: balance.tokenId,
+        symbol: balance.sym,
+        overlay: balance.overlay.toString(),
+        basket: balance.basket.toString(),
+        utxos: balance.utxos
+      }
+      return outcome(`Token balance: ${data.overlay} in the overlay and ${data.basket} in the local wallet.`, data)
+    }),
+
+    syncTokenWallet: async () => await safe(async () => {
+      if (opts.tokenKit === undefined) return outcome('BSV-21 is not configured for this agent yet.')
+      const result = await opts.tokenKit.sync()
+      return outcome('Token wallet synchronized with the overlay.', result)
+    }),
+
+    sendTokensToCompany: async (amount: string) => await safe(async () => {
+      const { tokenKit, tokenId, companyIdentityKey } = opts
+      if (tokenKit === undefined || tokenId === undefined || companyIdentityKey === undefined) {
+        return outcome('Token transfer is not configured. Check the BSV-21 overlay URL, token ID, and company identity key.')
+      }
+      if (!/^[1-9][0-9]*$/.test(amount)) {
+        return outcome('Amount must be a positive whole number of token units.', undefined, true)
+      }
+
+      await tokenKit.sync()
+      const result = await tokenKit.send(tokenId, BigInt(amount), companyIdentityKey)
+      return outcome(`Transferred ${amount} token units to the company.`, {
+        tokenId,
+        amount,
+        txid: result.txid
+      })
+    })
   }
 }
