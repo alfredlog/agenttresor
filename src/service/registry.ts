@@ -1,6 +1,6 @@
 /**
  * The agents the service hosts, one per profile. A profile is loaded the first
- * time it is asked for (so `npm run connect` can add one while the service
+ * time it is asked for (so `npm run setup <code>` can add one while the service
  * runs) and loaded again when its agent-config.json changes (a new connection
  * code gives the agent a new API key).
  */

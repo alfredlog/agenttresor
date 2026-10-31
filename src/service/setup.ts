@@ -14,7 +14,7 @@ import { connectAgent, parseConnectArgs } from '../agent/connect.js'
 import { activateIfNone, chooseActiveIfNone, readActiveAgent } from '../agent/profiles.js'
 import { activeMcpUrl, ensureClientConfig, type ClientConfigResult, type FileResult } from './client-config.js'
 import { checkServiceVersion, formatChecks, runDoctor, type Check, type DoctorDeps } from './doctor.js'
-import type { ServiceEnv } from './env.js'
+import { panelUrl, type ServiceEnv } from './env.js'
 
 export interface SetupDeps extends Omit<DoctorDeps, 'env'> {
   /** Starts the service if it is not running (launchd on macOS). */
@@ -93,6 +93,7 @@ export async function runSetup (e: ServiceEnv, argv: string[], deps: SetupDeps):
   say()
   say(formatChecks(checks))
   say()
+  say(`Agent panel (switch agents, see these checks): ${panelUrl(e.port)}`)
   say('Open a NEW Claude Code session in this folder.')
   return { agentId, connected, files, checks }
 }

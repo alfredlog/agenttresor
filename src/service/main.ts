@@ -5,14 +5,16 @@
  * if another instance holds the pid lock.
  */
 import type { Server } from 'node:http'
-import { loadEnv } from './env.js'
+import { loadEnv, panelUrl } from './env.js'
 import { createAgentServiceApp } from './app.js'
 import { acquirePidLock, AlreadyRunningError } from './control.js'
+import { runDoctor, type Check } from './doctor.js'
 import { migrateLegacyProfile } from '../agent/profiles.js'
 import { AgentRegistry } from './registry.js'
 import { readCodeVersion } from './version.js'
 
-const { dataDir, port, host, token, projectRoot } = loadEnv()
+const env = loadEnv()
+const { dataDir, port, host, token, projectRoot } = env
 const log = (msg: string): void => { process.stdout.write(`${new Date().toISOString()} ${msg}\n`) }
 
 let release: () => Promise<void>
@@ -31,12 +33,19 @@ try {
   const registry = new AgentRegistry(dataDir, log)
   // Read once: after a git pull the service keeps reporting the code it started with, so setup/doctor see it is stale.
   const version = await readCodeVersion(projectRoot)
-  const app = createAgentServiceApp({ registry, host, token, version, log })
+  // The panel's doctor: this process is the service, so "running" is a given; a stale one is restarted from a terminal.
+  const doctor = async (): Promise<Check[]> => await runDoctor({
+    env,
+    health: async () => ({ ok: true, pid: process.pid, version }),
+    diskVersion: async () => await readCodeVersion(projectRoot),
+    restart: async () => { throw new Error('the service cannot restart itself from the panel; run npm run doctor in a terminal') }
+  })
+  const app = createAgentServiceApp({ registry, host, token, version, panel: { doctor }, log })
   const server: Server = await new Promise((resolve, reject) => {
     const s = app.listen(port, host, () => { resolve(s) })
     s.once('error', reject)
   })
-  log(`agent service on http://${host}:${port} (pid ${process.pid}, code ${version.id})`)
+  log(`agent service on http://${host}:${port} (pid ${process.pid}, code ${version.id}); agent panel at ${panelUrl(port)}`)
   const activeId = await registry.activeAgent()
   log(activeId === undefined ? 'no active agent yet: /mcp answers 404 until npm run agents use <agentId>' : `active agent ${activeId}: MCP at http://${host}:${port}/mcp`)
   for (const agent of await registry.loadAll()) {

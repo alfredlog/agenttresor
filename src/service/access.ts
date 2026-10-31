@@ -79,3 +79,38 @@ export function decideAccess (a: AccessInput): AccessDecision {
   if (a.origin !== undefined) return { ok: false, status: 403, error: 'requests from web pages (Origin header) are refused' }
   return { ok: true, via: 'local' }
 }
+
+export type PanelAccessDecision = { ok: true } | { ok: false, status: 403 | 404 | 421, error: string }
+
+export interface PanelAccessInput {
+  /** The request carries proxy/tunnel forwarding headers. */
+  forwarded: boolean
+  /** The TCP peer is a loopback address. */
+  loopbackClient: boolean
+  /** The port the request arrived on. */
+  port: number
+  host?: string
+  origin?: string
+  /** An API call (true) or the page itself (false). */
+  api: boolean
+  /** The CSRF token the request carries (X-Panel-Token). */
+  csrf?: string
+  /** The service's token for this start. */
+  expectedCsrf: string
+}
+
+/**
+ * Who may use the local agent panel (/ and /panel/api/…): only this machine.
+ * Never through a tunnel or from another host (404, as if there were no panel);
+ * the Host must be 127.0.0.1:<port> (DNS rebinding); a request with an Origin
+ * must come from the panel itself, http://127.0.0.1:<port>; and every API call
+ * must carry the per-start CSRF token embedded in the page.
+ */
+export function decidePanelAccess (a: PanelAccessInput): PanelAccessDecision {
+  if (a.forwarded || !a.loopbackClient) return { ok: false, status: 404, error: 'not found' }
+  const self = `127.0.0.1:${a.port}`
+  if (a.host !== self) return { ok: false, status: 421, error: `open the panel at http://${self}/` }
+  if (a.origin !== undefined && a.origin !== `http://${self}`) return { ok: false, status: 403, error: 'requests from other web pages are refused' }
+  if (a.api && !sameSecret(a.csrf, a.expectedCsrf)) return { ok: false, status: 403, error: 'missing or invalid panel token: reload the panel' }
+  return { ok: true }
+}

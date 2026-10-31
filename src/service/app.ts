@@ -7,6 +7,8 @@
  *   /agents/<agentId>/v1/…                plain HTTP API (src/service/api.ts)
  *   /agents/<agentId>/s/<secret>/…        the same, through a public tunnel
  *   /health                               local only: is the service up, and which code it runs
+ *   /, /panel/api/…                       the local agent panel (panel.ts): this machine only,
+ *                                         never through a tunnel
  *
  * Each agent has its own MCP server, payer and key. Access rules are in
  * access.ts. URLs are never logged: the tunnel secret can be part of them.
@@ -16,6 +18,7 @@ import { localhostHostValidation } from '@modelcontextprotocol/sdk/server/middle
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { bearerOf, decideAccess, isForwarded, isLoopbackAddress, isLoopbackHost } from './access.js'
 import { createAgentApiRouter } from './api.js'
+import { createPanelRouter, type PanelOptions } from './panel.js'
 import type { AgentRegistry, AgentRuntime } from './registry.js'
 import type { CodeVersion } from './version.js'
 
@@ -27,6 +30,8 @@ export interface AgentServiceOptions {
   token?: string
   /** The code version the service runs (read at start), reported on /health. */
   version?: CodeVersion
+  /** The local agent panel's doctor checks (and a fetch for tests). */
+  panel?: Pick<PanelOptions, 'doctor' | 'fetch'>
   log?: (msg: string) => void
 }
 
@@ -71,6 +76,8 @@ export function createAgentServiceApp (opts: AgentServiceOptions): Express {
   app.get('/health', guard(() => undefined), (_req, res) => {
     res.json({ ok: true, pid: process.pid, version: opts.version })
   })
+
+  app.use(createPanelRouter({ ...opts.panel, dataDir: opts.registry.dataDir, log }))
 
   // Which agent a request is for: res.locals.agentId, set by byParam or byActive before the agent router.
   const agentIdOf = (res: Response): string => String(res.locals.agentId)
