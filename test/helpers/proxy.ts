@@ -58,8 +58,8 @@ export interface HarnessOptions {
   notifier?: Notifier
   /** A wallet (on this harness's mock chain: pass a function) to use as the notary. */
   notary?: { wallet: (chain: MockChain) => Promise<Wallet>, config?: Partial<NotaryConfig>, log?: (msg: string) => void }
-  /** Extra proxy options, e.g. { vaultCovenant: true }. */
-  app?: Pick<ProxyAppOptions, 'vaultCovenant' | 'anchorPayments' | 'log'>
+  /** Extra proxy options, e.g. { vaultCovenant: true } or a fake BSV/EUR rate. */
+  app?: Pick<ProxyAppOptions, 'vaultCovenant' | 'anchorPayments' | 'log' | 'rates'>
 }
 
 export async function createProxyHarness (opts: HarnessOptions = {}): Promise<ProxyHarness> {

@@ -104,7 +104,7 @@ preflight and applies the rules. Three outcomes:
   SPV, exact script and exact amount. The agent then calls `POST /v1/requests/:id/execute` and gets a 1-input,
   1-output transaction: the whole request vault goes to the merchant's price and the fee; the agent's own vault is
   not touched. If the price changed in any way, the request fails with nothing paid. The daily budget and the
-  per-payment maximum still apply at execute time. (BRC-121 payments expire after 30 s, so the company cannot sign the
+  per-payment maximum still apply at execute time (under EUR rules, at the rate of that moment). (BRC-121 payments expire after 30 s, so the company cannot sign the
   payment itself in advance; it funds it instead.)
 - **Against the rules**: `denied`, nothing is built.
 
@@ -115,6 +115,32 @@ Arcade and sends the request to the merchant with the BRC-121 payment headers. T
 
 A request vault that is never spent (price changed, denied at execute, expired after 24 h, or the company changed its
 mind) is listed under *Approved payments* on `/vault.html` and reclaimed by the company alone, like an agent vault.
+
+## Budgets in euros
+
+A company that thinks in euros can set an agent's rules in euros: on the dashboard, pick **euros (€)** in the rules
+form and type the limits as amounts (`0.50`). The admin API takes them as integer euro **cents**:
+`{ "currency": "EUR", "maxPerPaymentCents": 50, "dailyBudgetCents": 500, "approvalThresholdCents": 20 }`. Rules
+without a currency are in sats (`"currency": "SAT"`), so every existing agent stays as it was.
+
+- **Payments stay in sats.** Merchants price in sats and the vault pays in sats; only the limits are in euros.
+- **Conversion at payment time.** The proxy converts the merchant's sats price to cents at the current BSV/EUR rate,
+  **rounded up**, and compares it with the limits. The rate comes from CoinGecko's simple price for Bitcoin SV in EUR
+  (`src/shared/rate.ts`), cached for 60 s, with a 5 s timeout. An approved payment is converted again, at the rate of
+  the moment, when the agent executes it.
+- **Fail closed.** With no rate, or one older than 5 minutes, every payment under EUR rules is denied with
+  `exchange rate unavailable`.
+- **Recorded for accounting.** Every request judged with a rate keeps `eur_rate`, `eur_cents` and `rate_source`, for SAT
+  rules too. The daily EUR budget is the sum of the cents recorded for today's paid requests, so the amount spent does
+  not change when the rate moves. The ledger shows each payment in sats and in € at payment time, under a line
+  `1 BSV = x € (source, time)`.
+- **On-chain ceiling (v2 vaults).** A covenant can only count sats. With EUR rules, a new v2 vault's `MAX_SATS` is the
+  euro maximum per payment converted at the funding-time rate × 1.5, rounded up. That is a hard ceiling every node
+  enforces, with room for the rate to rise; the exact euro limit stays in the policy. The vault page shows both, for
+  example "max 0.50 € per payment, on-chain ceiling 10715 sats". Funding a v2 vault under EUR rules needs a rate.
+- **The agent sees euros:** `check_budget` reports the euro budget, and `get_price` adds the price in euros.
+- **The treasury stays in sats.** The money in the vault is BSV, so its euro value moves with the market; only the
+  limits are stable. A stablecoin in the vault is on the roadmap.
 
 ## Audit log (tamper-evident, anchored on BSV)
 
@@ -398,7 +424,7 @@ a reverse proxy, so the rate limit on `POST /v1/connect` (10 attempts per IP per
 - `src/vault/` — the vault: `script.ts` (locking/unlocking scripts, BIP-143 signing), `covenant.ts` (v2: OP_PUSH_TX covenant, nLockTime grinding), `builder.ts` (payment tx, fee
   at 100 sat/kB), `service.ts` (funding check by SPV, payment build/finalize), `broadcaster.ts` (Arcade)
 - `src/proxy/` — spend-control proxy: agent API (`/v1/…`, Bearer `agt_…`), rules (`rules.ts`: allowed hosts, max per
-  payment, daily budget, approval threshold), approvals, ledger in `./data/proxy.sqlite`. Admin API under `/admin`
+  payment, daily budget, approval threshold, in sats or euro cents), approvals, ledger in `./data/proxy.sqlite`. Admin API under `/admin`
   (Bearer `ADMIN_TOKEN`); dashboard at `/`, vault page at `/vault.html`
 - `src/company/vault-client.ts` — `fundVault`, `approveAndFund`, `reclaimVault` / `reclaimRequestVault` against any
   BRC-100 wallet; `vault-page.ts` is the
@@ -412,6 +438,8 @@ a reverse proxy, so the rate limit on `POST /v1/connect` (10 attempts per IP per
 - `src/service/` — the local agent service: `app.ts` (MCP per agent), `api.ts` (plain HTTP API), `access.ts`
   (loopback, Origin, tunnel secret), `panel.ts` (the local agent panel), `registry.ts` (profiles), `control.ts` (pid lock, start/stop), `launchd.ts`,
   `tunnel.ts` (cloudflared), `cli.ts` (`setup`, `agents`, `agent:*`), `main.ts`
+- `src/shared/rate.ts` — the BSV/EUR rate (CoinGecko, cached) and sats ↔ cents; `src/shared/rules-form.ts` — the
+  dashboard's rules form in sats or euros (`public/rules-form.js`)
 - `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
 - `src/audit/` — the hash-chained audit log, the OP_RETURN anchor script, anchor checks, `audit:verify`
 - `src/company/audit-client.ts` — `anchorAuditHead` against any BRC-100 wallet (`public/audit.js` in the browser)

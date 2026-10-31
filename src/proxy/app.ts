@@ -23,7 +23,8 @@ import { AuditLog } from '../audit/log.js'
 import { recordAnchor } from '../audit/anchors.js'
 import { alertMessage, Notary, type NotaryConfig } from '../audit/notary.js'
 import type { Notifier } from './notifier.js'
-import { DEFAULT_RULES, parseRules } from './rules.js'
+import { covenantMaxSats, DEFAULT_RULES, isEur, parseRules, RATE_UNAVAILABLE, type Rules } from './rules.js'
+import { freshQuote, type RateProvider } from '../shared/rate.js'
 import { CONNECT_CODE_TTL_MS, findConnectCode, generateConnectCode, hashConnectCode, merchantsFor, normalizeConnectCode, RateLimiter } from './connect.js'
 import { ProxyError, SpendControl, type Outcome } from './service.js'
 import { ProxyStore, REQUEST_STATUSES, SPENT_STATUSES, type Agent, type PaymentRequestRecord, type RequestStatus } from './store.js'
@@ -48,10 +49,12 @@ export interface ProxyAppOptions {
   connectRateLimit?: { max: number, windowMs: number }
   /** Put an anchor of the audit log head into every vault payment (option A, default true). */
   anchorPayments?: boolean
-  /** VAULT_COVENANT: NEW agent vaults are v2, capped on chain at the agent's maxPerPaymentSats (default false). */
+  /** VAULT_COVENANT: NEW agent vaults are v2, capped on chain at the agent's maxPerPaymentSats (EUR rules: the euro maximum at the funding-time rate x 1.5; default false). */
   vaultCovenant?: boolean
   /** VAULT_COVENANT_MAX_FEE_SATS: the most fee a v2 payment may pay (default 1000). */
   vaultCovenantMaxFeeSats?: number
+  /** The BSV/EUR rate (CoinGecko in the server): needed by EUR rules; without it, EUR payments are denied. */
+  rates?: RateProvider
   /** Operational log lines (no secrets). */
   log?: (msg: string) => void
   /** The operator's notary wallet (option B): anchors the log when it is idle. Without it there is no idle anchoring. */
@@ -74,6 +77,10 @@ function covenantOf (lockingScript: string | null): CovenantCaps | null {
   return v2 === undefined ? null : { maxSats: v2.maxSats, maxFeeSats: v2.maxFeeSats }
 }
 
+/** The euro limit a vault's on-chain ceiling stands for (EUR rules), shown next to it on the vault page. */
+const policyOf = (rules: Rules): { currency: 'EUR', maxPerPaymentCents: number } | null =>
+  isEur(rules) ? { currency: 'EUR', maxPerPaymentCents: rules.maxPerPaymentCents } : null
+
 function requestView (r: PaymentRequestRecord): Record<string, unknown> {
   return {
     requestId: r.id,
@@ -89,7 +96,12 @@ function requestView (r: PaymentRequestRecord): Record<string, unknown> {
     createdAt: iso(r.createdAt),
     decidedAt: iso(r.decidedAt),
     decidedBy: r.decidedBy,
-    paidAt: iso(r.paidAt)
+    paidAt: iso(r.paidAt),
+    // The price in euros at the rate the request was judged (or paid) at.
+    eurCents: r.eurCents ?? undefined,
+    eurRate: r.eurRate ?? undefined,
+    rateSource: r.rateSource ?? undefined,
+    rateAt: iso(r.rateAt) ?? undefined
   }
 }
 
@@ -144,11 +156,15 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     now,
     anchorPayments: opts.anchorPayments ?? true,
     covenantCaps: opts.vaultCovenant === true
-      ? async agentId => ({ maxSats: (await store.getRules(agentId)).maxPerPaymentSats, maxFeeSats: opts.vaultCovenantMaxFeeSats ?? DEFAULT_COVENANT_MAX_FEE_SATS })
+      ? async agentId => {
+        const maxSats = covenantMaxSats(await store.getRules(agentId), { quote: await opts.rates?.current(), now: now() })
+        if (maxSats === undefined) throw new ProxyError(503, `${RATE_UNAVAILABLE}: a v2 vault under EUR rules needs the current BSV/EUR rate to set its on-chain ceiling`)
+        return { maxSats, maxFeeSats: opts.vaultCovenantMaxFeeSats ?? DEFAULT_COVENANT_MAX_FEE_SATS }
+      }
       : undefined,
     log: opts.log
   })
-  const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now })
+  const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now, rates: opts.rates })
   const notary = opts.notary === undefined
     ? undefined
     : new Notary({
@@ -415,6 +431,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     res.json({
       network,
       totalSats: rows.reduce((s, r) => s + (r.priceSats ?? 0), 0),
+      // Euros at payment time, for the payments that have a recorded rate.
+      totalEurCents: rows.reduce((s, r) => s + (r.eurCents ?? 0), 0),
       entries: rows.map(r => ({
         ...requestView(r),
         response: undefined,
@@ -428,11 +446,17 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   // ── Vaults (the company funds and reclaims them from its own wallet) ─────
   const knownAgent = async (id: string): Promise<string> => (await liveAgent(id)).id
 
+  // The current BSV/EUR rate, as the rules see it (fresh: at most 5 minutes old).
+  admin.get('/rate', wrap(async (_req, res) => {
+    const q = await opts.rates?.current()
+    res.json(q === undefined ? { available: false } : { available: freshQuote(q, now()), rate: q.rate, at: iso(q.at), source: q.source })
+  }))
+
   admin.get('/vaults', wrap(async (_req, res) => {
     const vaults = await vault.listVaults()
     res.json({
       network,
-      vaults: vaults.map(v => ({
+      vaults: await Promise.all(vaults.map(async v => ({
         agentId: v.agentId,
         agentName: v.agentName,
         status: v.status,
@@ -440,13 +464,15 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         outpoint: v.status === 'open' ? `${v.txid!}.${v.vout!}` : null,
         // v2: the most output 0 of a payment may carry, and the most fee, enforced by every node.
         covenant: covenantOf(v.lockingScript),
+        policy: policyOf(await store.getRules(v.agentId)),
         explorerUrl: v.txid === null ? null : txLink(v.txid, network)
-      }))
+      })))
     })
   }))
 
   admin.get('/vaults/:agentId/params', wrap(async (req, res) => {
-    res.json(await vault.params(await knownAgent(String(req.params.agentId))))
+    const agentId = await knownAgent(String(req.params.agentId))
+    res.json({ ...await vault.params(agentId), policy: policyOf(await store.getRules(agentId)) })
   }))
 
   admin.post('/vaults/:agentId/funded', wrap(async (req, res) => {

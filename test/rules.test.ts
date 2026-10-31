@@ -47,7 +47,8 @@ describe('evaluate()', () => {
 
 describe('parseRules() and dayStart()', () => {
   it('accepts valid rules and rejects bad ones', () => {
-    expect(parseRules(rules)).toEqual(rules)
+    // Without a currency, rules are in sats (agents from before currencies stay 'SAT').
+    expect(parseRules(rules)).toEqual({ ...rules, currency: 'SAT' })
     expect(parseRules({ ...rules, allowedHosts: 'api.example.com' })).toMatch(/allowedHosts/)
     expect(parseRules({ ...rules, dailyBudgetSats: -1 })).toMatch(/dailyBudgetSats/)
     expect(parseRules({ ...rules, maxPerPaymentSats: 1.5 })).toMatch(/maxPerPaymentSats/)

@@ -60,8 +60,9 @@ export interface VaultServiceOptions {
   anchorPayments?: boolean
   /**
    * VAULT_COVENANT: the caps a NEW agent vault gets as a v2 covenant (the
-   * agent's maxPerPaymentSats, and the fee cap), or undefined for a v1 vault.
-   * Request vaults stay v1.
+   * agent's maxPerPaymentSats, or for EUR rules the euro maximum at the current
+   * rate x 1.5; and the fee cap), or undefined for a v1 vault. It may throw
+   * (no exchange rate). Request vaults stay v1.
    */
   covenantCaps?: (agentId: string) => Promise<CovenantCaps | undefined>
   log?: (msg: string) => void
@@ -124,6 +125,8 @@ export class VaultService {
   private readonly now: () => number
   private readonly anchorPayments: boolean
   private readonly covenantCaps: (agentId: string) => Promise<CovenantCaps | undefined>
+  /** New vaults are v2 (whatever caps the company's script chose). */
+  private readonly covenantEnabled: boolean
   private readonly log: (msg: string) => void
 
   constructor (opts: VaultServiceOptions) {
@@ -135,6 +138,7 @@ export class VaultService {
     this.now = opts.now
     this.anchorPayments = opts.anchorPayments ?? true
     this.covenantCaps = opts.covenantCaps ?? (async () => undefined)
+    this.covenantEnabled = opts.covenantCaps !== undefined
     this.log = opts.log ?? (() => {})
   }
 
@@ -179,8 +183,8 @@ export class VaultService {
     const vault = await this.store.getVault(agentId)
     if (vault === undefined) throw new ProxyError(409, 'the agent has not registered its public key yet')
     if (vault.status === 'open') throw new ProxyError(409, 'the vault is already funded')
-    const covenant = await this.covenantCaps(agentId) !== undefined
-    const f = await this.verifyFunding(agentId, vault.agentPub, body, covenant)
+    // The cap is the company's choice (it built the script), so funding needs no exchange rate.
+    const f = await this.verifyFunding(agentId, vault.agentPub, body, this.covenantEnabled)
     if (f.satoshis < 1) throw new ProxyError(400, 'the vault output holds no satoshis')
 
     // The SPV check above is network I/O, so it runs before the transaction; the vault is re-read inside it.

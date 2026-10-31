@@ -3,6 +3,7 @@
  *   public/vault.js        the vault page (fund, approve, reclaim from BSV Desktop)
  *   public/fingerprint.js  the agent key fingerprint, for the dashboard
  *   public/setup-command.js  the setup command shown for a connection link (dashboard, connect page)
+ *   public/rules-form.js     the rules form (sats or euros) and the BSV/EUR line, for the dashboard
  *   public/audit.js        "Anchor now" and "Top up notary" with BSV Desktop on the dashboard (loaded on demand)
  * src/shared/bsv.ts loads the SDK with createRequire (Node only); in the bundle
  * it is replaced by src/shared/bsv.browser.ts, which re-exports the ESM build.
@@ -26,6 +27,7 @@ await build({
     vault: resolve(root, 'src/company/vault-page.ts'),
     fingerprint: resolve(root, 'src/shared/fingerprint.ts'),
     'setup-command': resolve(root, 'src/shared/setup-command.ts'),
+    'rules-form': resolve(root, 'src/shared/rules-form.ts'),
     audit: resolve(root, 'src/company/audit-page.ts')
   },
   outdir: resolve(root, 'public'),

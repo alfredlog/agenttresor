@@ -40,13 +40,13 @@ async function refreshVaults (): Promise<void> {
   if (adminToken === '') return
   try {
     const res = await fetch(`${proxyUrl}/admin/vaults`, { headers: { Authorization: `Bearer ${adminToken}` } })
-    const body = await res.json() as { error?: string, network: string, vaults: Array<{ agentId: string, agentName: string, status: string, satoshis: number, outpoint: string | null, covenant: Covenant | null }> }
+    const body = await res.json() as { error?: string, network: string, vaults: Array<{ agentId: string, agentName: string, status: string, satoshis: number, outpoint: string | null, covenant: Covenant | null, policy?: Policy | null }> }
     if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`)
     explorer = body.network === 'test' ? 'https://test.whatsonchain.com' : 'https://whatsonchain.com'
     $('vaults').innerHTML = body.vaults.length === 0
       ? '<tr><td colspan="5" class="muted">No agent has registered a key yet.</td></tr>'
       : body.vaults.map(v => `<tr data-agent="${esc(v.agentId)}">
-          <td class="mono">${esc(v.agentId)}</td><td>${esc(v.agentName)}</td><td>${esc(v.status.replace('_', ' '))}${v.covenant === null ? '' : `<br><span class="muted">${esc(covenantLabel(v.covenant))}</span>`}</td>
+          <td class="mono">${esc(v.agentId)}</td><td>${esc(v.agentName)}</td><td>${esc(v.status.replace('_', ' '))}${v.covenant === null ? '' : `<br><span class="muted">${esc(covenantLabel(v.covenant, v.policy))}</span>`}</td>
           <td class="num">${esc(v.satoshis)}</td><td class="mono">${v.outpoint === null ? '' : txLink(v.outpoint.split('.')[0])}</td></tr>`).join('')
   } catch (err) {
     log(esc((err as Error).message), 'error')
@@ -95,10 +95,13 @@ function updateButtons (): void {
 }
 
 interface Covenant { maxSats: number, maxFeeSats: number }
+/** EUR rules: the exact euro limit, enforced by the policy; the covenant holds the on-chain ceiling. */
+interface Policy { currency: 'EUR', maxPerPaymentCents: number }
 
 /** How a v2 vault is described on the page and the dashboard. */
-const covenantLabel = (c: Covenant): string =>
-  `v2 covenant: max ${c.maxSats} sats per payment, fee at most ${c.maxFeeSats} sats, change locked to the vault`
+const covenantLabel = (c: Covenant, policy?: Policy | null): string => policy == null
+  ? `v2 covenant: max ${c.maxSats} sats per payment, fee at most ${c.maxFeeSats} sats, change locked to the vault`
+  : `v2 covenant: max ${(policy.maxPerPaymentCents / 100).toFixed(2)} € per payment, on-chain ceiling ${c.maxSats} sats, fee at most ${c.maxFeeSats} sats, change locked to the vault`
 
 async function loadFundFingerprint (): Promise<void> {
   const { proxyUrl, adminToken, agentId } = settings()
@@ -112,7 +115,7 @@ async function loadFundFingerprint (): Promise<void> {
     if (params.agentId !== agentId || $<HTMLInputElement>('agent').value.trim() !== agentId) return // answer for an older input
     fundShown = fingerprint(params.agentPub)
     $('fund-fp-text').innerHTML = `Agent key fingerprint of <span class="mono">${esc(agentId)}</span>: <span class="fp">${esc(fundShown)}</span>` +
-      (params.covenant == null ? '' : `<br>This vault will be ${esc(covenantLabel(params.covenant))}; you can always reclaim it alone.`)
+      (params.covenant == null ? '' : `<br>This vault will be ${esc(covenantLabel(params.covenant, params.policy))}; you can always reclaim it alone.`)
     $<HTMLInputElement>('fund-confirm').disabled = false
   } catch (err) {
     $('fund-fp-text').textContent = `${agentId}: ${(err as Error).message}`
