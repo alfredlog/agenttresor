@@ -1,5 +1,5 @@
 /**
- * The agent's connection settings, written once by `npm run connect <code>`:
+ * The agent's connection settings, written once by `npm run setup <code|link>`:
  * MCP_DATA_DIR/agent-config.json (mode 0600) with the proxy URL, the agent id,
  * its API key and the merchants it may pay. The MCP server reads it; the env
  * vars PROXY_URL, AGENT_API_KEY and MERCHANT_URLS override it.
@@ -13,6 +13,8 @@ export const AGENT_CONFIG_FILE = 'agent-config.json'
 export interface AgentConfig {
   proxyUrl: string
   agentId: string
+  /** The agent's name on the dashboard, if the proxy sent it. */
+  name?: string
   apiKey: string
   merchants: Merchant[]
   connectedAt: string
@@ -43,7 +45,7 @@ export async function readAgentConfig (dataDir: string): Promise<AgentConfig | u
   }
   const c = JSON.parse(raw) as Partial<AgentConfig>
   if (typeof c.proxyUrl !== 'string' || typeof c.agentId !== 'string' || typeof c.apiKey !== 'string' || !Array.isArray(c.merchants)) {
-    throw new Error(`${agentConfigPath(dataDir)} is incomplete; run npm run connect <code> again`)
+    throw new Error(`${agentConfigPath(dataDir)} is incomplete; run npm run setup "<link>" again with a new connection link`)
   }
   return c as AgentConfig
 }

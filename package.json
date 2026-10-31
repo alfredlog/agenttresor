@@ -10,7 +10,7 @@
   "scripts": {
     "merchant": "tsx src/merchant/server.ts",
     "proxy": "npm run build:web && tsx src/proxy/server.ts",
-    "connect": "tsx src/agent/connect-cli.ts",
+    "connect": "tsx src/service/cli.ts setup",
     "setup": "tsx src/service/cli.ts setup",
     "agents": "tsx src/service/cli.ts agents",
     "doctor": "tsx src/service/cli.ts doctor",

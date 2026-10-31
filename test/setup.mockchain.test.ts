@@ -174,6 +174,7 @@ describe('npm run setup', () => {
     expect(checkNamed(r.checks, 'agent key registered')?.detail).toMatch(/fingerprint [0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}/)
     expect(checkNamed(r.checks, 'service up to date')).toMatchObject({ ok: true })
     expect(output.at(-1)).toBe('Open a NEW Claude Code session in this folder.')
+    expect(output.at(-2)).toBe(`Agent panel (switch agents, see these checks): ${base}/`)
     expect(output.join('\n')).not.toMatch(/agt_[0-9a-f]{8}/)
   })
 

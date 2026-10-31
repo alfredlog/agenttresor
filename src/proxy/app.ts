@@ -264,17 +264,18 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
       const s = store.with(trx)
       // Every active code is compared in constant time: a wrong, expired or used code costs the same as a right one.
       const match = findConnectCode(await s.activeConnectCodes(t), hashConnectCode(code))
-      if (match === undefined || (await s.getAgent(match.agentId))?.status !== 'active') return undefined
+      const agent = match === undefined ? undefined : await s.getAgent(match.agentId)
+      if (match === undefined || agent?.status !== 'active') return undefined
       if (!await s.useConnectCode(match.codeHash, t)) return undefined
       // The API key is minted now; before this, no one has ever seen a working key for this agent.
       const apiKey = generateAgentKey()
       await s.replaceAgentKey(match.agentId, hashAgentKey(apiKey), agentKeyHint(apiKey))
       await audit.with(trx).append(`agent:${match.agentId}`, 'agent.connected', { agentId: match.agentId, keyHint: maskAgentKey(agentKeyHint(apiKey)) })
-      return { agentId: match.agentId, apiKey, rules: await s.getRules(match.agentId) }
+      return { agentId: match.agentId, agentName: agent.name, apiKey, rules: await s.getRules(match.agentId) }
     })
     if (result === undefined) { refused(); return }
     // The only response that ever carries the agent's API key.
-    res.json({ agentId: result.agentId, apiKey: result.apiKey, proxyUrl: publicUrl(req), merchants: merchantsFor(result.rules.allowedHosts) })
+    res.json({ agentId: result.agentId, agentName: result.agentName, apiKey: result.apiKey, proxyUrl: publicUrl(req), merchants: merchantsFor(result.rules.allowedHosts) })
   }))
 
   // The agent generates its own key pair and registers only the public key.

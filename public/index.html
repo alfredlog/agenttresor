@@ -103,8 +103,8 @@
       <button id="code-copy" class="primary">Copy</button>
       <button id="code-close">Close</button>
     </div>
-    <p class="hint muted">Next step: on the agent's own machine, in the agent's project folder, run this command. It saves the agent's
-      settings, creates its signing key and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on
+    <p class="hint muted">Next step: on the agent's own machine, in the agent's project folder, run this command (a checkout of this project, <code>npm install</code> once). It
+      connects the agent, creates its signing key, runs the agent service, sets up Claude Code and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on
       <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same. The code works once.</p>
   </div>
 
@@ -189,6 +189,7 @@
 <script type="module">
   // Built by `npm run build:web` from src/shared/fingerprint.ts (the agent and vault.html use the same function).
   import { fingerprint } from './fingerprint.js'
+  import { setupCommand } from './setup-command.js'
 
   // The admin token lives in sessionStorage only, so it is gone when the tab closes.
   // Agent API keys are never stored anywhere in the browser.
@@ -366,11 +367,10 @@
 
   function showCode (agentLabel, issued) {
     clearInterval(codeTimer)
-    const proxy = new URL(issued.connectUrl).origin
     $('code-agent').textContent = agentLabel
     $('code-value').textContent = issued.connectCode
-    // `--` hands --proxy to the script; without it npm would take --proxy as its own setting.
-    $('code-command').value = `npm run connect ${issued.connectCode} -- --proxy ${proxy}`
+    // The whole link, quoted so zsh keeps the #code: setup connects, runs the service and writes the client config.
+    $('code-command').value = setupCommand(issued.connectUrl)
     $('code-copy').disabled = false
     $('code-box').hidden = false
     const expires = Date.parse(issued.expiresAt)

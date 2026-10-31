@@ -21,14 +21,15 @@
 <body>
 <main>
   <h1>Connect an AgentTresor agent</h1>
-  <p class="muted">Run this once in the agent's project folder, on the agent's own machine. The code works once, for 10 minutes.</p>
+  <p class="muted">Run this once on the agent's own machine, in a checkout of this project (<code>npm install</code> once). The code works once, for 10 minutes.</p>
   <div class="card">
     <code id="command">No connection code in this link.</code>
     <div class="row"><button id="copy" hidden>Copy</button></div>
   </div>
-  <p class="muted">It saves the agent's settings in <code>mcp-data/agent-config.json</code>, creates the agent's own signing key and prints its fingerprint: check that fingerprint on the vault page before funding the agent.</p>
+  <p class="muted">It connects the agent (its settings and its own signing key go to <code>mcp-data/agents/&lt;agentId&gt;/</code>), runs the agent service, sets up Claude Code and prints the key's fingerprint: check that fingerprint on the vault page before funding the agent. Then open a new Claude Code session in that folder.</p>
 </main>
-<script>
+<script type="module">
+  import { setupCommand } from './setup-command.js'
   // The code travels in the #fragment, which browsers never send to the server.
   const copy = document.getElementById('copy')
   let command = ''
@@ -36,7 +37,8 @@
     let code = ''
     try { code = decodeURIComponent(location.hash.slice(1)).trim() } catch {}
     const valid = /^AT-[0-9A-Z]{4}-[0-9A-Z]{4}$/i.test(code)
-    command = valid ? `npm run connect ${code.toUpperCase()} -- --proxy ${location.origin}` : ''
+    // The whole link, quoted so zsh keeps the #code.
+    command = valid ? setupCommand(`${location.origin}/connect#${code.toUpperCase()}`) : ''
     document.getElementById('command').textContent = valid ? command : 'No connection code in this link.'
     copy.hidden = !valid
     copy.textContent = 'Copy'

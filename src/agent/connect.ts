@@ -1,5 +1,5 @@
 /**
- * `npm run connect <code> [--proxy https://…]`: exchanges a one-time
+ * The connect step of `npm run setup <code|link>`: exchanges a one-time
  * connection code for the agent's settings and saves them in the agent's
  * profile (MCP_DATA_DIR/agents/<agentId>/agent-config.json, mode 0600), creates
  * or loads that profile's own signing key and registers its public key with
@@ -17,12 +17,12 @@ export interface ConnectTarget {
   proxyUrl: string
 }
 
-export const CONNECT_USAGE = 'usage: npm run connect <code> -- --proxy https://your-proxy   or   npm run connect "https://your-proxy/connect#AT-XXXX-XXXX"'
+export const CONNECT_USAGE = 'usage: npm run setup "https://your-proxy/connect#AT-XXXX-XXXX"   or   npm run setup <code> -- --proxy https://your-proxy'
 
 /**
  * Reads the code and the proxy URL from the command line, in this order:
  * an explicit --proxy, the URL of a connection link (https://<proxy>/connect#AT-…),
- * npm_config_proxy (what npm makes of `npm run connect <code> --proxy URL`
+ * npm_config_proxy (what npm makes of `npm run setup <code> --proxy URL`
  * without `--`), then PROXY_URL.
  */
 export function parseConnectArgs (argv: string[], env: NodeJS.ProcessEnv): ConnectTarget {
@@ -67,7 +67,7 @@ export async function connectAgent (target: ConnectTarget, dataDir: string, fetc
   } catch (err) {
     throw new Error(`cannot reach the proxy at ${target.proxyUrl}: ${err instanceof Error ? err.message : String(err)}`)
   }
-  const body = await res.json().catch(() => ({})) as { agentId?: string, apiKey?: string, merchants?: Merchant[], error?: string }
+  const body = await res.json().catch(() => ({})) as { agentId?: string, agentName?: unknown, apiKey?: string, merchants?: Merchant[], error?: string }
   if (res.status === 429) throw new Error('too many attempts from this address; wait a few minutes and try again')
   if (!res.ok || typeof body.apiKey !== 'string' || typeof body.agentId !== 'string') {
     throw new Error(`the proxy at ${target.proxyUrl} refused the code (${res.status}): ${body.error ?? 'no details'}. Ask your admin for a new code.`)
@@ -80,6 +80,7 @@ export async function connectAgent (target: ConnectTarget, dataDir: string, fetc
   const configPath = await writeAgentConfig(dir, {
     proxyUrl: target.proxyUrl,
     agentId: body.agentId,
+    ...(typeof body.agentName === 'string' && body.agentName !== '' ? { name: body.agentName.slice(0, 100) } : {}),
     apiKey: body.apiKey,
     merchants: body.merchants ?? [],
     connectedAt: new Date().toISOString()

@@ -9,7 +9,7 @@ import { getPrice, type AgentPayer, type PayResult } from './pay.js'
 import type { ProxyClient } from './proxy-client.js'
 import { fingerprint } from '../shared/fingerprint.js'
 
-export const NOT_CONNECTED = 'Not connected. Ask your admin for a connection code and run: npm run connect <code>'
+export const NOT_CONNECTED = 'Not connected. Ask your admin for a connection link and run: npm run setup "<link>"'
 
 export interface AgentToolsOptions {
   payer?: AgentPayer

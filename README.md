@@ -15,7 +15,7 @@ npm test               # offline, on wallet-toolbox's mock chain
 npm run typecheck
 npm run merchant       # demo merchant on MERCHANT_PORT (default 5080)
 npm run proxy          # spend-control proxy + dashboard on PROXY_PORT (default 5050)
-npm run setup <code>   # on the agent's machine: connect + run the agent service on MCP_PORT (default 5070)
+npm run setup "https://your-proxy.example/connect#AT-XXXX-XXXX"   # on the agent's machine: the link the dashboard shows
 ```
 
 ## The three parties
@@ -86,8 +86,8 @@ and funded again with a higher cap; the reclaim always works.
 
 ## How a payment works
 
-The company creates the agent on the dashboard (`/`: name and rules) and gives it a one-time connection code. The
-agent runs `npm run setup <code>` on its own machine: it creates its signing key, registers the public key
+The company creates the agent on the dashboard (`/`: name and rules) and gives it a one-time connection link. The
+agent runs `npm run setup "<link>"` on its own machine: it creates its signing key, registers the public key
 (`POST /v1/vault/agent-key`) and prints `Agent key fingerprint: XXXX-XXXX-XXXX`. The company funds the agent's vault
 on `/vault.html` only after checking that the fingerprint shown there, computed in the browser from the registered
 key, is the same as on the agent's machine (`src/shared/fingerprint.ts`: first 6 bytes of sha256 of the compressed
@@ -214,8 +214,9 @@ the change is rolled back too.
 ## Connect an agent
 
 1. **Get a code.** The admin creates the agent on the dashboard (`/`): *New agent*, with its name and rules. The
-   dashboard shows a one-time code (`AT-XXXX-XXXX`, valid for 10 minutes, usable once) and the exact link, with a
-   Copy button.
+   dashboard shows a one-time code (`AT-XXXX-XXXX`, valid for 10 minutes, usable once) and the exact command, with
+   a Copy button: `npm run setup "<link>"`. The link is in double quotes so zsh keeps the `#`. The link's page
+   (`/connect#AT-…`) shows the same command.
 2. **Run setup on the agent's machine**, in a checkout of this project (`npm install` once):
    ```bash
    npm run setup "https://your-proxy.example/connect#AT-XXXX-XXXX"
@@ -259,14 +260,13 @@ the same `/mcp`.
 - the vault is funded, and whether it is v1 or v2;
 - `.mcp.json` and `.claude/settings.local.json` are right.
 
-**Several agents on one machine:** `npm run agents` lists them (`*` marks the active one), and
-`npm run agents use <agentId>` switches. `/mcp` then serves that agent; no client file changes, so start a new
+**Switch agents: open http://127.0.0.1:5070 or run `npm run agents use <id>`.** `npm run agents` lists them (`*`
+marks the active one). `/mcp` then serves that agent; no client file changes, so start a new
 conversation. Each agent also keeps its own address, `/agents/<agentId>/mcp`.
 
 *New code* on the dashboard issues a fresh code, for example for a new machine. Without an open vault, the agent's
 current API key stops working at once. With an open vault, it keeps working until the new code is used. A new machine
-has a new signing key, so an open vault must be reclaimed and funded again for it. `npm run connect` connects without
-touching the service or any client file.
+has a new signing key, so an open vault must be reclaimed and funded again for it.
 
 ## Run the agent
 
@@ -290,7 +290,14 @@ kept old code after a `git pull`, and restart it: `launchctl kickstart -k` on ma
 | `npm run agent:install-service` / `agent:uninstall-service` | macOS launchd agent (your user account, never root) |
 | `npm run agent:run` | the service in the foreground, for debugging |
 
-A profile added with `npm run connect` while the service runs is served at once, and a new connection code for an
+**The agent panel**, `http://127.0.0.1:5070/` (served by the service; `setup` and `doctor` print its address): the
+agent profiles on this machine with their name, proxy, fingerprint, vault balance and version (v1, or v2 with its
+covenant caps), which one is ACTIVE, an *Activate* button per agent (the same as `npm run agents use <id>`), and the
+doctor checks with their fixes. It answers this machine only: never through the tunnel or from another host, only
+at `127.0.0.1` (DNS rebinding), and its API refuses any other web page's Origin and any request without the random
+token embedded in the page at each service start. It never shows a key, an `agt_` key or a tunnel secret.
+
+A profile added with `npm run setup "<link>"` while the service runs is served at once, and a new connection code for an
 agent is picked up without a restart. The single-agent files of earlier versions (`mcp-data/agent-config.json`,
 `mcp-data/agent-key.json`) are moved into their agent's profile on the first start.
 
@@ -396,14 +403,14 @@ a reverse proxy, so the rate limit on `POST /v1/connect` (10 attempts per IP per
 - `src/company/vault-client.ts` — `fundVault`, `approveAndFund`, `reclaimVault` / `reclaimRequestVault` against any
   BRC-100 wallet; `vault-page.ts` is the
   browser script of `public/vault.html`, bundled by `npm run build:web` into `public/vault.js`
-- `src/agent/` — the agent side: `connect.ts` (`npm run connect`), `profiles.ts` (one directory per agent, migration,
+- `src/agent/` — the agent side: `connect.ts` (the connect step of `npm run setup`), `profiles.ts` (one directory per agent, migration,
   tunnel secret), `config.ts` (`agent-config.json`), `keys.ts` (its own key, `agent-key.json`), `tools.ts` (the tools,
   shared by MCP and the HTTP API), `proxy-client.ts`, `pay.ts` (price check, sign, retry once), `vault-signer.ts`
   (checks a payment before signing it)
 - `src/proxy/connect.ts` — one-time connection codes, constant-time lookup, rate limit, merchants from allowed hosts
 - `src/mcp/` — the agent's MCP server: `server.ts` (tools), `setup.ts` (settings, key, registration), `main.ts` (stdio)
 - `src/service/` — the local agent service: `app.ts` (MCP per agent), `api.ts` (plain HTTP API), `access.ts`
-  (loopback, Origin, tunnel secret), `registry.ts` (profiles), `control.ts` (pid lock, start/stop), `launchd.ts`,
+  (loopback, Origin, tunnel secret), `panel.ts` (the local agent panel), `registry.ts` (profiles), `control.ts` (pid lock, start/stop), `launchd.ts`,
   `tunnel.ts` (cloudflared), `cli.ts` (`setup`, `agents`, `agent:*`), `main.ts`
 - `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
 - `src/audit/` — the hash-chained audit log, the OP_RETURN anchor script, anchor checks, `audit:verify`

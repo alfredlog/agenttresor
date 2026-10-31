@@ -157,12 +157,12 @@ describe('GET /v1/services', () => {
   })
 })
 
-describe('npm run connect', () => {
+describe('connecting (npm run setup <code|link>)', () => {
   it('reads the code and the proxy URL from the command line', () => {
     const code = 'AT-ABCD-EFGH'
     expect(parseConnectArgs([`https://proxy.example/connect#${code}`], {})).toEqual({ code, proxyUrl: 'https://proxy.example' })
     expect(parseConnectArgs([code, '--proxy', 'https://proxy.example/'], {})).toEqual({ code, proxyUrl: 'https://proxy.example' })
-    // `npm run connect <code> --proxy URL` without `--`: npm keeps --proxy and sets npm_config_proxy.
+    // `npm run setup <code> --proxy URL` without `--`: npm keeps --proxy and sets npm_config_proxy.
     expect(parseConnectArgs([code], { npm_config_proxy: 'https://proxy.example/' })).toEqual({ code, proxyUrl: 'https://proxy.example' })
     expect(parseConnectArgs([code], { PROXY_URL: 'https://fallback.example' })).toEqual({ code, proxyUrl: 'https://fallback.example' })
     expect(() => parseConnectArgs([code], {})).toThrow(/no proxy URL/)
@@ -180,7 +180,7 @@ describe('npm run connect', () => {
     expect((await stat(profile)).mode & 0o777).toBe(0o700)
     expect((await stat(configPath)).mode & 0o777).toBe(0o600)
     const config = JSON.parse(await readFile(configPath, 'utf8'))
-    expect(config).toMatchObject({ proxyUrl: h.url, agentId: created.id, apiKey: expect.stringMatching(/^agt_/), merchants: [{ name: merchantHost }] })
+    expect(config).toMatchObject({ proxyUrl: h.url, agentId: created.id, name: 'cli-bot', apiKey: expect.stringMatching(/^agt_/), merchants: [{ name: merchantHost }] })
     expect(JSON.stringify(r)).not.toMatch(/agt_/) // what the CLI prints from
 
     const key = JSON.parse(await readFile(join(profile, AGENT_KEY_FILE), 'utf8'))
@@ -207,7 +207,7 @@ describe('the MCP server', () => {
   it('without a config it still starts, and every tool says how to connect', async () => {
     const { mcp, disconnected } = await connectMcp(await dir())
     expect(disconnected).toBe(NOT_CONNECTED)
-    expect(NOT_CONNECTED).toBe('Not connected. Ask your admin for a connection code and run: npm run connect <code>')
+    expect(NOT_CONNECTED).toBe('Not connected. Ask your admin for a connection link and run: npm run setup "<link>"')
     const { tools } = await mcp.listTools()
     expect(tools).toHaveLength(6)
     const args: Record<string, Record<string, unknown>> = {

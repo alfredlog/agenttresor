@@ -1,11 +1,11 @@
 /**
  * Commands for the local agent service (see README "Run the agent"):
  *
- *   npm run setup <code|link> [-- --proxy URL] [-- --claude-desktop]
+ *   npm run setup "<link>" | <code> [-- --proxy URL] [-- --claude-desktop]
  *                                           connect, run the service, write the client config, doctor
  *   npm run setup                           the same for the agents already on this machine (repair)
  *   npm run agents                          list the agent profiles (* = active, served at /mcp)
- *   npm run agents use <agentId>            make another agent the active one
+ *   npm run agents use <agentId>            make another agent the active one (or the panel, http://127.0.0.1:5070/)
  *   npm run doctor                          check everything; restart a stale service; print fixes
  *   npm run agent:start | agent:stop | agent:status
  *   npm run agent:install-service | agent:uninstall-service   (macOS launchd)
@@ -24,7 +24,7 @@ import { ProxyClient } from '../agent/proxy-client.js'
 import { activeMcpUrl, claudeDesktopConfigPath } from './client-config.js'
 import { AlreadyRunningError, logPath, runningPid, serviceHealth, startService, stopService } from './control.js'
 import { formatChecks, runDoctor, type DoctorDeps } from './doctor.js'
-import { loadEnv, localBase, mcpUrl, type ServiceEnv } from './env.js'
+import { loadEnv, localBase, mcpUrl, panelUrl, type ServiceEnv } from './env.js'
 import { installService, isServiceInstalled, kickstartLaunchdService, startLaunchdService, stopLaunchdService, uninstallService } from './launchd.js'
 import { runSetup } from './setup.js'
 import { readCodeVersion } from './version.js'
@@ -240,6 +240,8 @@ async function setupCmd (e: ServiceEnv, argv: string[]): Promise<void> {
 async function doctorCmd (e: ServiceEnv): Promise<void> {
   const checks = await runDoctor(doctorDeps(e))
   say(formatChecks(checks))
+  say()
+  say(`Agent panel (switch agents, see these checks): ${panelUrl(e.port)}`)
   if (checks.some(c => !c.ok)) process.exitCode = 1
 }
 

@@ -39,3 +39,5 @@ export function loadEnv (env: NodeJS.ProcessEnv = process.env): ServiceEnv {
 export const localBase = (port: number): string => `http://127.0.0.1:${port}`
 /** One agent's own MCP address; clients use the active agent's /mcp instead (client-config.ts). */
 export const mcpUrl = (port: number, agentId: string): string => `${localBase(port)}/agents/${agentId}/mcp`
+/** The local agent panel (panel.ts): switch agents, see the doctor checks. */
+export const panelUrl = (port: number): string => `${localBase(port)}/`
