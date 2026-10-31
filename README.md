@@ -211,52 +211,80 @@ the change is rolled back too.
   (they contain its txid, so they cannot be inside it). The notary picks those up once the log is idle.
 - **One proxy process per database.** Appends, the per-agent locks and the verified mark are per process.
 
-## Connect an agent in 30 seconds
+## Connect an agent
 
-1. **Admin, on the dashboard** (`/`): *New agent* with its name and rules. The dashboard shows a one-time code
-   (`AT-XXXX-XXXX`, valid 10 minutes, usable once) and the exact command, with a Copy button.
-2. **On the agent's machine**, in a checkout of this project (`npm install` once):
+1. **Get a code.** The admin creates the agent on the dashboard (`/`): *New agent*, with its name and rules. The
+   dashboard shows a one-time code (`AT-XXXX-XXXX`, valid for 10 minutes, usable once) and the exact link, with a
+   Copy button.
+2. **Run setup on the agent's machine**, in a checkout of this project (`npm install` once):
    ```bash
-   npm run setup AT-XXXX-XXXX -- --proxy https://your-proxy.example
+   npm run setup "https://your-proxy.example/connect#AT-XXXX-XXXX"
    ```
-   It adds the agent's profile (`mcp-data/agents/<agentId>/`: settings and the agent's own signing key, mode 0600),
-   registers the key, starts the agent service (see [Run the agent](#run-the-agent)) and prints
-   `Agent key fingerprint: XXXX-XXXX-XXXX`. The API key is never printed. The link form works too:
-   `npm run setup "https://your-proxy.example/connect#AT-XXXX-XXXX"`. `npm run connect` does the same without
-   touching the service.
-3. **Admin, on `/vault.html`**: check that the fingerprint shown there is the one the agent printed, then fund the
-   vault.
+   The code form works too: `npm run setup AT-XXXX-XXXX -- --proxy https://your-proxy.example`.
+3. **Open a NEW Claude Code session in this folder.** The `agenttresor` tools are there, already approved.
 
-*New code* on the dashboard issues a fresh code, e.g. for a new machine. Without an open vault the agent's current
-API key stops working at once; with an open vault it keeps working until the new code is used. A new machine has a
-new signing key, so an open vault must be reclaimed and funded again for it.
+Then the admin checks on `/vault.html` that the fingerprint shown there is the one setup printed, and funds the
+vault.
+
+What setup does, with no manual edits:
+- **The profile:** it adds the agent's profile, `mcp-data/agents/<agentId>/`: its settings and its own signing key,
+  mode 0600. It registers the key with the proxy. The API key is never printed.
+- **The active agent:** it makes the agent active if none is. The service serves the active agent at the stable
+  address `http://127.0.0.1:5070/mcp` (and `/v1/…`). Its id is in `mcp-data/active`.
+- **The service:** it makes sure the agent service runs (see [Run the agent](#run-the-agent)). If the service runs
+  older code than the checkout (after a `git pull`), it restarts it.
+- **The client config,** written once. A file that is already right is never rewritten, because Claude Code drops a
+  server whose `.mcp.json` changes mid-session.
+  - `.mcp.json`: `"agenttresor": { "type": "http", "url": "http://127.0.0.1:5070/mcp" }`, merged into an existing
+    file. Other servers stay, and the previous file is kept as `.mcp.json.bak`.
+  - `.claude/settings.local.json`: `"enabledMcpjsonServers"` gets `"agenttresor"`, and only that server; it never
+    sets `enableAllProjectMcpServers`. Every other key stays. This is why Claude Code does not ask for approval
+    again.
+  - `.gitignore`: gets these files. None of them holds a key.
+- **The check:** it runs `npm run doctor` and prints the result.
+
+Run without a code, `npm run setup` repairs a machine that is already connected. If no agent is active, it makes the
+only one active, or the one connected most recently. Then it writes the client config, restarts a stale service and
+runs doctor.
+
+`npm run setup -- --claude-desktop` also adds the server to Claude Desktop's config (on macOS,
+`~/Library/Application Support/Claude/claude_desktop_config.json`). The entry is merged in, with a backup, then
+restart Claude Desktop. That file only runs local commands, so the entry runs `src/mcp/bridge.ts`: a stdio bridge to
+the same `/mcp`.
+
+**`npm run doctor`** checks everything and says in plain words what is wrong and the exact command that fixes it:
+- the service is running, and runs the code on disk (a stale service is restarted on the spot);
+- the proxy is reachable with the agent's key;
+- the key is registered (and its fingerprint);
+- the vault is funded, and whether it is v1 or v2;
+- `.mcp.json` and `.claude/settings.local.json` are right.
+
+**Several agents on one machine:** `npm run agents` lists them (`*` marks the active one), and
+`npm run agents use <agentId>` switches. `/mcp` then serves that agent; no client file changes, so start a new
+conversation. Each agent also keeps its own address, `/agents/<agentId>/mcp`.
+
+*New code* on the dashboard issues a fresh code, for example for a new machine. Without an open vault, the agent's
+current API key stops working at once. With an open vault, it keeps working until the new code is used. A new machine
+has a new signing key, so an open vault must be reclaimed and funded again for it. `npm run connect` connects without
+touching the service or any client file.
 
 ## Run the agent
 
-The agent side is a long-running local service (`src/service/`) that hosts one or more agents, each from its own
-profile `mcp-data/agents/<agentId>/` (directory 0700; `agent-config.json`, `agent-key.json`, later `tunnel-secret`,
-all 0600). MCP clients reach it over HTTP, so it keeps running between turns (Claude Code's desktop app stops stdio
-servers at the end of every turn).
+The agent side is a long-running local service (`src/service/`). It hosts one or more agents, each from its own
+profile `mcp-data/agents/<agentId>/`: a directory with mode 0700 holding `agent-config.json`, `agent-key.json` and,
+later, `tunnel-secret`, all mode 0600. MCP clients reach it over HTTP, so it keeps running between turns (Claude
+Code's desktop app stops stdio servers at the end of every turn).
 
-```bash
-npm run setup AT-XXXX-XXXX -- --proxy https://your-proxy.example
-```
-
-`setup` = connect (adds the profile, with a new key of its own) + run the service (on macOS a launchd agent of your
-user, `~/Library/LaunchAgents/de.agenttresor.agent.plist`, started at login and restarted if it stops; elsewhere a
-background process) + status + the fingerprint reminder. It then prints the `.mcp.json` for Claude Code and offers to
-write it if the project has none:
-
-```json
-{ "mcpServers": { "agenttresor": { "type": "http", "url": "http://127.0.0.1:5070/agents/<agentId>/mcp" } } }
-```
-
-`.mcp.json` names your own agent, so it is gitignored; `.mcp.json.example` is the template. Claude Code asks once to
-approve the `agenttresor` server. Instead of the file: `claude mcp add --transport http agenttresor <that url>`.
+How it runs: on macOS it is a launchd agent of your user (`~/Library/LaunchAgents/de.agenttresor.agent.plist`),
+started at login and restarted if it stops; elsewhere it is a background process. `GET /health` reports the code
+version it started with (package version and git commit). That is how `setup` and `doctor` notice a service that
+kept old code after a `git pull`, and restart it: `launchctl kickstart -k` on macOS, stop and start elsewhere.
 
 | Command | |
 |---|---|
-| `npm run agents` | the profiles: agent id, proxy, key fingerprint |
+| `npm run setup` | configure or repair this machine (see [Connect an agent](#connect-an-agent)) |
+| `npm run doctor` | check everything, restart a stale service, print the fix for each problem |
+| `npm run agents` / `agents use <agentId>` | the profiles (`*` = active, served at `/mcp`); switch the active agent |
 | `npm run agent:status` | is the service running; per agent: proxy reachable, vault balance, fingerprint, MCP URL |
 | `npm run agent:start` / `agent:stop` | background service (`mcp-data/agent.pid`, log in `mcp-data/agent.log`); a second instance is refused |
 | `npm run agent:install-service` / `agent:uninstall-service` | macOS launchd agent (your user account, never root) |
@@ -277,8 +305,9 @@ Settings: `MCP_PORT` (5070), `MCP_DATA_DIR` (`mcp-data`), `MCP_HOST` (127.0.0.1)
 environment or the project's `.env`. The service ignores `PROXY_URL`, `AGENT_API_KEY` and `MERCHANT_URLS`: each
 profile has its own.
 
-**Claude Desktop** and other clients that keep a stdio server running can still use `npm run --silent mcp`: it serves
-`AGENT_ID`'s profile, or the only one (here `PROXY_URL`, `AGENT_API_KEY` and `MERCHANT_URLS` still override it).
+**Claude Desktop:** `npm run setup -- --claude-desktop` (above). Clients that keep a stdio server running can also
+use `npm run --silent mcp`: it serves `AGENT_ID`'s profile, or the only one. There, `PROXY_URL`, `AGENT_API_KEY` and
+`MERCHANT_URLS` still override the profile.
 
 ### Plain HTTP API
 

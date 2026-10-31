@@ -104,6 +104,15 @@ export interface ReclaimableUtxo {
   protocolID: typeof VAULT_PROTOCOL
   keyID: string
 }
+export interface VaultBalance {
+  status: string
+  satoshis: number
+  outpoint: string | null
+  /** 1 or 2 while the vault is open, else null. */
+  version: 1 | 2 | null
+  covenant: CovenantCaps | null
+}
+
 const errorMessage = (err: unknown): string => err instanceof Error ? err.message : String(err)
 
 export class VaultService {
@@ -318,11 +327,19 @@ export class VaultService {
     })
   }
 
-  async balance (agentId: string): Promise<{ status: string, satoshis: number, outpoint: string | null }> {
+  /** The agent's vault as the agent sees it; `version` 2 is a covenant vault with its on-chain caps. */
+  async balance (agentId: string): Promise<VaultBalance> {
     const vault = await this.store.getVault(agentId)
-    if (vault === undefined) return { status: 'none', satoshis: 0, outpoint: null }
+    if (vault === undefined) return { status: 'none', satoshis: 0, outpoint: null, version: null, covenant: null }
     const open = vault.status === 'open'
-    return { status: vault.status, satoshis: open ? vault.satoshis! : 0, outpoint: open ? `${vault.txid!}.${vault.vout!}` : null }
+    const v2 = open ? parseCovenantScript(vault.lockingScript!) : undefined
+    return {
+      status: vault.status,
+      satoshis: open ? vault.satoshis! : 0,
+      outpoint: open ? `${vault.txid!}.${vault.vout!}` : null,
+      version: open ? (v2 === undefined ? 1 : 2) : null,
+      covenant: v2 === undefined ? null : { maxSats: v2.maxSats, maxFeeSats: v2.maxFeeSats }
+    }
   }
 
   /** Why the vault cannot pay `sats` (the on-chain hard cap), or undefined if it can. */

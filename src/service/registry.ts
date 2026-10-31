@@ -7,7 +7,7 @@
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AGENT_CONFIG_FILE } from '../agent/config.js'
-import { isAgentId, listProfiles, profileDir, readTunnelSecret } from '../agent/profiles.js'
+import { isAgentId, listProfiles, profileDir, readActiveAgent, readTunnelSecret } from '../agent/profiles.js'
 import { setupAgent, type AgentSetup } from '../mcp/setup.js'
 
 export interface AgentRuntime {
@@ -69,6 +69,11 @@ export class AgentRegistry {
       }
     }
     return loaded
+  }
+
+  /** The active agent (served at /mcp and /v1), read from disk on every call so `npm run agents use` takes effect at once. */
+  async activeAgent (): Promise<string | undefined> {
+    return await readActiveAgent(this.dataDir).catch(() => undefined)
   }
 
   /** The agent's tunnel secret, read from disk on every call so a rotation takes effect at once. */

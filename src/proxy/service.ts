@@ -13,7 +13,7 @@
  * process: run one proxy process per database.
  */
 import { randomBytes } from 'node:crypto'
-import type { FundingBody, FinalizedPayment, SignRequest, VaultService } from '../vault/service.js'
+import type { FundingBody, FinalizedPayment, SignRequest, VaultBalance, VaultService } from '../vault/service.js'
 import type { RequestVault } from '../vault/store.js'
 import type { Knex } from 'knex'
 import type { AuditLog } from '../audit/log.js'
@@ -315,7 +315,7 @@ export class SpendControl {
     return record
   }
 
-  async budget (agent: Agent): Promise<{ rules: Rules, spentTodaySats: number, remainingTodaySats: number, day: string, vault: { status: string, satoshis: number, outpoint: string | null } }> {
+  async budget (agent: Agent): Promise<{ rules: Rules, spentTodaySats: number, remainingTodaySats: number, day: string, vault: VaultBalance }> {
     const now = this.now()
     const rules = await this.store.getRules(agent.id)
     const spent = await this.store.spentSince(agent.id, dayStart(now))

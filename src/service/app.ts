@@ -1,10 +1,12 @@
 /**
  * The local agent service: one HTTP server hosting every agent profile.
  *
+ *   /mcp, /v1/…                           the ACTIVE agent (MCP_DATA_DIR/active): a stable
+ *                                         address for MCP clients, whichever agent it is
  *   /agents/<agentId>/mcp                 MCP (Streamable HTTP, stateless)
  *   /agents/<agentId>/v1/…                plain HTTP API (src/service/api.ts)
  *   /agents/<agentId>/s/<secret>/…        the same, through a public tunnel
- *   /health                               local only: is the service up
+ *   /health                               local only: is the service up, and which code it runs
  *
  * Each agent has its own MCP server, payer and key. Access rules are in
  * access.ts. URLs are never logged: the tunnel secret can be part of them.
@@ -15,6 +17,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { bearerOf, decideAccess, isForwarded, isLoopbackAddress, isLoopbackHost } from './access.js'
 import { createAgentApiRouter } from './api.js'
 import type { AgentRegistry, AgentRuntime } from './registry.js'
+import type { CodeVersion } from './version.js'
 
 export interface AgentServiceOptions {
   registry: AgentRegistry
@@ -22,6 +25,8 @@ export interface AgentServiceOptions {
   host?: string
   /** MCP_TOKEN: required when `host` is not a loopback address. */
   token?: string
+  /** The code version the service runs (read at start), reported on /health. */
+  version?: CodeVersion
   log?: (msg: string) => void
 }
 
@@ -46,8 +51,8 @@ export function createAgentServiceApp (opts: AgentServiceOptions): Express {
   app.use(express.json({ limit: '1mb' }))
 
   /** Runs the access rules for `agentId` (undefined: no agent, e.g. /health), then the SDK Host check for local access. */
-  const guard = (agentOf: (req: Request) => string | undefined) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const agentId = agentOf(req)
+  const guard = (agentOf: (req: Request, res: Response) => string | undefined) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const agentId = agentOf(req, res)
     const decision = decideAccess({
       loopbackBind,
       forwarded: isForwarded(req),
@@ -64,17 +69,19 @@ export function createAgentServiceApp (opts: AgentServiceOptions): Express {
   }
 
   app.get('/health', guard(() => undefined), (_req, res) => {
-    res.json({ ok: true, pid: process.pid })
+    res.json({ ok: true, pid: process.pid, version: opts.version })
   })
 
+  // Which agent a request is for: res.locals.agentId, set by byParam or byActive before the agent router.
+  const agentIdOf = (res: Response): string => String(res.locals.agentId)
   const agent = express.Router({ mergeParams: true })
-  agent.use(guard(req => String(req.params.agentId)))
+  agent.use(guard((_req, res) => agentIdOf(res)))
   agent.use(async (req, res, next) => {
     let runtime: AgentRuntime | undefined
     try {
-      runtime = await opts.registry.get(String(req.params.agentId))
+      runtime = await opts.registry.get(agentIdOf(res))
     } catch (err) {
-      log(`[${String(req.params.agentId)}] could not load: ${err instanceof Error ? err.message : String(err)}`)
+      log(`[${agentIdOf(res)}] could not load: ${err instanceof Error ? err.message : String(err)}`)
       reject(req, res, 500, 'the agent could not be loaded; see the service log')
       return
     }
@@ -104,9 +111,23 @@ export function createAgentServiceApp (opts: AgentServiceOptions): Express {
   agent.use('/v1', createAgentApiRouter(log))
   agent.use((req, res) => { reject(req, res, 404, 'not found') })
 
+  const byParam = (req: Request, res: Response, next: NextFunction): void => { res.locals.agentId = String(req.params.agentId); next() }
   // The secret path first: /agents/<id>/s/<secret>/mcp would otherwise reach the plain route's guard without its secret.
-  app.use('/agents/:agentId/s/:secret', agent)
-  app.use('/agents/:agentId', agent)
+  app.use('/agents/:agentId/s/:secret', byParam, agent)
+  app.use('/agents/:agentId', byParam, agent)
+
+  // The active agent, read on every request: `npm run agents use <id>` switches without touching any client config.
+  const active = express.Router()
+  active.use(async (req, res, next) => {
+    const id = await opts.registry.activeAgent()
+    if (id === undefined) { reject(req, res, 404, 'no active agent on this machine: npm run agents use <agentId>'); return }
+    res.locals.agentId = id
+    next()
+  }, agent)
+  app.use((req, res, next) => {
+    if (req.path === '/mcp' || req.path === '/v1' || req.path.startsWith('/v1/')) active(req, res, next)
+    else next()
+  })
 
   app.use((req: Request, res: Response) => { reject(req, res, 404, 'not found') })
   // Malformed JSON and other errors: a short answer, never the request URL.

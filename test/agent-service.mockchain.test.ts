@@ -22,7 +22,6 @@ import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/me
 import { decideAccess } from '../src/service/access'
 import { createAgentServiceApp } from '../src/service/app'
 import { acquirePidLock, AlreadyRunningError, startService } from '../src/service/control'
-import { mcpJsonFor } from '../src/service/env'
 import { buildPlist, LAUNCHD_LABEL } from '../src/service/launchd'
 import { AgentRegistry } from '../src/service/registry'
 import { capabilityUrl } from '../src/service/tunnel'
@@ -380,9 +379,8 @@ describe('service files', () => {
     expect(plist).not.toMatch(/UserName|agt_|MCP_TOKEN/)
   })
 
-  it('.mcp.json points Claude Code at one agent over HTTP', async () => {
-    expect(JSON.parse(mcpJsonFor(5070, 'A-0123ABCD'))).toEqual({ mcpServers: { agenttresor: { type: 'http', url: 'http://127.0.0.1:5070/agents/A-0123ABCD/mcp' } } })
+  it('.mcp.json.example points Claude Code at the active agent over HTTP', async () => {
     const example = JSON.parse(await readFile('.mcp.json.example', 'utf8'))
-    expect(example.mcpServers.agenttresor).toEqual({ type: 'http', url: 'http://127.0.0.1:5070/agents/<agentId>/mcp' })
+    expect(example.mcpServers.agenttresor).toEqual({ type: 'http', url: 'http://127.0.0.1:5070/mcp' })
   })
 })

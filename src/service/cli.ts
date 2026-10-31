@@ -1,8 +1,12 @@
 /**
  * Commands for the local agent service (see README "Run the agent"):
  *
- *   npm run setup <code> [-- --proxy URL]   connect + run the service + status
- *   npm run agents                          list the agent profiles
+ *   npm run setup <code|link> [-- --proxy URL] [-- --claude-desktop]
+ *                                           connect, run the service, write the client config, doctor
+ *   npm run setup                           the same for the agents already on this machine (repair)
+ *   npm run agents                          list the agent profiles (* = active, served at /mcp)
+ *   npm run agents use <agentId>            make another agent the active one
+ *   npm run doctor                          check everything; restart a stale service; print fixes
  *   npm run agent:start | agent:stop | agent:status
  *   npm run agent:install-service | agent:uninstall-service   (macOS launchd)
  *   npm run agent:tunnel [agentId]          public link for ChatGPT (cloudflared)
@@ -11,15 +15,19 @@
  * Messages go to stderr. No API key, private key or tunnel secret is printed,
  * except the single capability URL printed by agent:tunnel (on stdout).
  */
-import { access, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline/promises'
-import { connectAgent, parseConnectArgs } from '../agent/connect.js'
-import { ensureTunnelSecret, listProfiles, migrateLegacyProfile, readProfile, readTunnelSecret, rotateTunnelSecret, type ProfileInfo } from '../agent/profiles.js'
+import {
+  ensureTunnelSecret, listProfiles, migrateLegacyProfile, readActiveAgent, readProfile,
+  readTunnelSecret, rotateTunnelSecret, setActiveAgent, type ProfileInfo
+} from '../agent/profiles.js'
 import { ProxyClient } from '../agent/proxy-client.js'
+import { activeMcpUrl, claudeDesktopConfigPath } from './client-config.js'
 import { AlreadyRunningError, logPath, runningPid, serviceHealth, startService, stopService } from './control.js'
-import { loadEnv, localBase, mcpJsonFor, mcpUrl, type ServiceEnv } from './env.js'
-import { installService, isServiceInstalled, startLaunchdService, stopLaunchdService, uninstallService } from './launchd.js'
+import { formatChecks, runDoctor, type DoctorDeps } from './doctor.js'
+import { loadEnv, localBase, mcpUrl, type ServiceEnv } from './env.js'
+import { installService, isServiceInstalled, kickstartLaunchdService, startLaunchdService, stopLaunchdService, uninstallService } from './launchd.js'
+import { runSetup } from './setup.js'
+import { readCodeVersion } from './version.js'
 import { capabilityUrl, CLOUDFLARED_INSTALL, cloudflaredInstalled, openTunnel } from './tunnel.js'
 
 const say = (msg = ''): void => { process.stderr.write(`${msg}\n`) }
@@ -29,14 +37,34 @@ const macos = process.platform === 'darwin'
 /** Only what the service cannot find in the project's .env: an MCP_DATA_DIR given in the shell. Never secrets. */
 const launchdEnv = (e: ServiceEnv): Record<string, string> => process.env.MCP_DATA_DIR === undefined ? {} : { MCP_DATA_DIR: e.dataDir }
 
-async function waitForHealth (e: ServiceEnv, timeoutMs = 30_000): Promise<boolean> {
+async function waitForHealth (e: ServiceEnv, timeoutMs = 30_000, ready: (h: { pid?: number, version?: { id: string } }) => boolean = () => true): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if ((await serviceHealth(e.port, e.token))?.ok === true) return true
+    const h = await serviceHealth(e.port, e.token)
+    if (h?.ok === true && ready(h)) return true
     await sleep(300)
   }
   return false
 }
+
+/** Restarts the service so it runs the code on disk (launchctl kickstart -k on macOS, stop + start otherwise). */
+async function restartService (e: ServiceEnv): Promise<void> {
+  const disk = await readCodeVersion(e.projectRoot)
+  if (macos && await isServiceInstalled()) {
+    await kickstartLaunchdService()
+  } else {
+    await stopService(e.dataDir)
+    await startService(e, { port: e.port, token: e.token })
+  }
+  if (!await waitForHealth(e, 30_000, h => h.version?.id === disk.id)) throw new Error(`the restarted service did not come back with the new code; see ${logPath(e.dataDir)}`)
+}
+
+const doctorDeps = (e: ServiceEnv): DoctorDeps => ({
+  env: e,
+  health: async () => await serviceHealth(e.port, e.token),
+  diskVersion: async () => await readCodeVersion(e.projectRoot),
+  restart: async () => { await restartService(e) }
+})
 
 async function migrate (e: ServiceEnv): Promise<void> {
   const m = await migrateLegacyProfile(e.dataDir)
@@ -121,6 +149,7 @@ async function statusCmd (e: ServiceEnv, only?: string): Promise<void> {
     : `Agent service: not running${launchd ? ' (launchd service installed)' : ''}. Start it with npm run agent:start.`)
   const profiles = (await listProfiles(e.dataDir)).filter(p => only === undefined || p.agentId === only)
   if (profiles.length === 0) { say('No agent connected yet: npm run setup <code>'); return }
+  const active = await readActiveAgent(e.dataDir)
   for (const p of profiles) {
     const s = await agentStatus(p)
     say()
@@ -128,18 +157,32 @@ async function statusCmd (e: ServiceEnv, only?: string): Promise<void> {
     say(`  proxy:       ${s.proxyUrl ?? '-'} — ${s.proxy}`)
     say(`  vault:       ${s.vault}`)
     say(`  fingerprint: ${s.fingerprint}`)
-    say(`  MCP:         ${mcpUrl(e.port, s.agentId)}`)
+    say(`  MCP:         ${mcpUrl(e.port, s.agentId)}${s.agentId === active ? ` (active: also ${activeMcpUrl(e.port)})` : ''}`)
     say(`  tunnel:      ${s.tunnel}`)
   }
 }
 
-async function agentsCmd (e: ServiceEnv): Promise<void> {
+async function agentsCmd (e: ServiceEnv, args: string[]): Promise<void> {
+  if (args[0] === 'use') return await useCmd(e, args[1])
+  if (args.length > 0) throw new Error('usage: npm run agents [use <agentId>]')
   const profiles = await listProfiles(e.dataDir)
   if (profiles.length === 0) { say('No agent profiles yet: npm run setup <code>'); return }
-  // The list itself goes to stdout, so it can be piped.
+  const active = await readActiveAgent(e.dataDir)
+  // The list itself goes to stdout, so it can be piped; * marks the active agent.
   for (const p of profiles) {
-    process.stdout.write(`${p.agentId}\t${p.config?.proxyUrl ?? `(${p.error ?? 'not connected'})`}\t${p.fingerprint ?? 'no key yet'}\n`)
+    process.stdout.write(`${p.agentId === active ? '*' : ' '} ${p.agentId}\t${p.config?.proxyUrl ?? `(${p.error ?? 'not connected'})`}\t${p.fingerprint ?? 'no key yet'}\n`)
   }
+  if (active === undefined) say('No active agent: npm run agents use <agentId>')
+}
+
+/** Switches the active agent. Clients keep their config: /mcp now serves this agent. */
+async function useCmd (e: ServiceEnv, agentId: string | undefined): Promise<void> {
+  if (agentId === undefined) throw new Error('usage: npm run agents use <agentId>')
+  const p = await readProfile(e.dataDir, agentId)
+  if (p?.config === undefined) throw new Error(`no connected agent ${agentId} on this machine; see npm run agents`)
+  await setActiveAgent(e.dataDir, agentId)
+  say(`Active agent: ${agentId}. ${activeMcpUrl(e.port)} serves it from now on; no client config changes.`)
+  say('Start a new conversation in your MCP client so it lists this agent\'s tools fresh.')
 }
 
 async function tunnelCmd (e: ServiceEnv, agentArg: string | undefined): Promise<void> {
@@ -183,47 +226,32 @@ async function ensureRunning (e: ServiceEnv): Promise<void> {
   if (!healthy) await startCmd(e)
 }
 
-async function offerMcpJson (e: ServiceEnv, agentId: string): Promise<void> {
-  const snippet = mcpJsonFor(e.port, agentId)
-  say()
-  say('Claude Code: put this in .mcp.json in your project (or run: claude mcp add --transport http agenttresor ' + mcpUrl(e.port, agentId) + ')')
-  say()
-  say(snippet.trimEnd())
-  const path = join(e.projectRoot, '.mcp.json')
-  if (await access(path).then(() => true, () => false)) {
-    say()
-    say(`${path} already exists; it was not changed.`)
-    return
-  }
-  if (process.stdin.isTTY !== true) return
-  const rl = createInterface({ input: process.stdin, output: process.stderr })
-  const answer = await rl.question(`\nWrite it to ${path}? [y/N] `)
-  rl.close()
-  if (/^y(es)?$/i.test(answer.trim())) {
-    await writeFile(path, snippet, { flag: 'wx' })
-    say(`Wrote ${path} (it is gitignored: it names your agent).`)
-  }
-}
-
-async function setupCmd (e: ServiceEnv, args: string[]): Promise<void> {
+/** npm run setup [<code|link>]: see setup.ts. */
+async function setupCmd (e: ServiceEnv, argv: string[]): Promise<void> {
   await migrate(e)
-  const r = await connectAgent(parseConnectArgs(args, process.env), e.dataDir)
-  say(`Connected as ${r.agentId}. Settings: ${r.configPath} (mode 0600).`)
-  await ensureRunning(e)
-  await statusCmd(e, r.agentId)
-  say()
-  say(`Agent key fingerprint: ${r.fingerprint} — check it on the vault page before funding.`)
-  await offerMcpJson(e, r.agentId)
+  await runSetup(e, argv, {
+    ...doctorDeps(e),
+    ensureRunning: async () => { await ensureRunning(e) },
+    claudeDesktopPath: claudeDesktopConfigPath(),
+    say
+  })
 }
 
-const USAGE = 'usage: cli.ts setup <code> | agents | start | stop | status | install-service | uninstall-service | tunnel [agentId] | tunnel-revoke [agentId]'
+async function doctorCmd (e: ServiceEnv): Promise<void> {
+  const checks = await runDoctor(doctorDeps(e))
+  say(formatChecks(checks))
+  if (checks.some(c => !c.ok)) process.exitCode = 1
+}
+
+const USAGE = 'usage: cli.ts setup [<code|link>] | agents [use <agentId>] | doctor | start | stop | status | install-service | uninstall-service | tunnel [agentId] | tunnel-revoke [agentId]'
 
 async function main (argv: string[]): Promise<void> {
   const e = loadEnv()
   const [cmd, ...rest] = argv
   switch (cmd) {
     case 'setup': return await setupCmd(e, rest)
-    case 'agents': await migrate(e); return await agentsCmd(e)
+    case 'agents': await migrate(e); return await agentsCmd(e, rest)
+    case 'doctor': await migrate(e); return await doctorCmd(e)
     case 'start': await migrate(e); return await startCmd(e)
     case 'stop': return await stopCmd(e)
     case 'status': await migrate(e); return await statusCmd(e)
