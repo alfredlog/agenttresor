@@ -3,7 +3,8 @@
  * browser page passes `new WalletClient('auto')` (BSV Desktop), tests pass a
  * wallet-toolbox wallet. The company's key never leaves its wallet.
  *
- *  - fundVault: lock `sats` in this agent's vault script (agent AND policy, or company alone).
+ *  - fundVault: lock `sats` in this agent's vault script (agent AND policy, or company alone);
+ *    a v2 script (OP_PUSH_TX covenant on the agent + policy branch) when the proxy asks for one.
  *    Funding needs the agent key fingerprint a human confirmed on the agent's machine:
  *    it is recomputed here from the key about to be funded, never taken from the proxy.
  *  - approveAndFund: approve one payment above the threshold by funding a request
@@ -12,7 +13,8 @@
  */
 import { LockingScript, Signature, Transaction, Utils, type WalletInterface, type WalletProtocol } from '../shared/bsv.js'
 import { isFingerprint, requireConfirmedFingerprint } from '../shared/fingerprint.js'
-import { parseVaultScript, reclaimUnlockingScript, RECLAIM_UNLOCK_LENGTH, vaultLockingScript, vaultSighash } from '../vault/script.js'
+import { covenantLockingScript, parseVaultSource } from '../vault/covenant.js'
+import { reclaimUnlockingScript, RECLAIM_UNLOCK_LENGTH, vaultLockingScript, vaultSighash } from '../vault/script.js'
 
 export interface ProxyAdmin {
   proxyUrl: string
@@ -37,6 +39,8 @@ export interface VaultParams {
   policyPub: string
   protocolID: WalletProtocol
   keyID: string
+  /** Set when the proxy runs with VAULT_COVENANT=true: fund a v2 vault capped at maxSats per payment and maxFeeSats of fee. */
+  covenant?: { maxSats: number, maxFeeSats: number } | null
 }
 
 /** The keys of an agent's vault, before funding (the page computes the fingerprint from agentPub). */
@@ -69,7 +73,9 @@ export async function fundVault (
   const params = await getVaultParams(proxyUrl, adminToken, agentId)
   requireConfirmedFingerprint(params.agentPub, confirmedFingerprint)
   const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: params.protocolID, keyID: params.keyID, counterparty: 'self' })
-  const lockingScript = vaultLockingScript({ agentPub: params.agentPub, policyPub: params.policyPub, companyPub }).toHex()
+  const keys = { agentPub: params.agentPub, policyPub: params.policyPub, companyPub }
+  // v2 keeps the company's reclaim branch exactly as v1: the covenant only binds the agent + policy branch.
+  const lockingScript = (params.covenant == null ? vaultLockingScript(keys) : covenantLockingScript({ ...keys, ...params.covenant })).toHex()
 
   const created = await wallet.createAction({
     description: `Fund AgentTresor vault ${agentId}`.slice(0, 50),
@@ -158,7 +164,7 @@ async function reclaim (wallet: WalletInterface, admin: ProxyAdmin, utxoPath: st
 
   // Check the script really is our vault before signing anything for it.
   const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: utxo.protocolID, keyID: utxo.keyID, counterparty: 'self' })
-  if (parseVaultScript(utxo.lockingScript)?.companyPub !== companyPub) throw new Error('this vault is not locked to the company key')
+  if (parseVaultSource(utxo.lockingScript)?.companyPub !== companyPub) throw new Error('this vault is not locked to the company key')
   const lockingScript = LockingScript.fromHex(utxo.lockingScript)
 
   // No outputs: the wallet's change output takes the funds back.

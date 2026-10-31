@@ -11,7 +11,7 @@ import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../../src/agent/vault-signer'
 import { fundVault } from '../../src/company/vault-client'
 import { fingerprint } from '../../src/shared/fingerprint'
-import { createProxyApp, notaryOf } from '../../src/proxy/app'
+import { createProxyApp, notaryOf, type ProxyAppOptions } from '../../src/proxy/app'
 import type { Notary, NotaryConfig } from '../../src/audit/notary'
 import { DashboardNotifier, type Notifier } from '../../src/proxy/notifier'
 import { openProxyDb } from '../../src/proxy/store'
@@ -58,6 +58,8 @@ export interface HarnessOptions {
   notifier?: Notifier
   /** A wallet (on this harness's mock chain: pass a function) to use as the notary. */
   notary?: { wallet: (chain: MockChain) => Promise<Wallet>, config?: Partial<NotaryConfig>, log?: (msg: string) => void }
+  /** Extra proxy options, e.g. { vaultCovenant: true }. */
+  app?: Pick<ProxyAppOptions, 'vaultCovenant' | 'anchorPayments' | 'log'>
 }
 
 export async function createProxyHarness (opts: HarnessOptions = {}): Promise<ProxyHarness> {
@@ -85,6 +87,7 @@ export async function createProxyHarness (opts: HarnessOptions = {}): Promise<Pr
     now: () => Date.now() + clock.offset,
     // Every test connects from 127.0.0.1.
     connectRateLimit: { max: 10_000, windowMs: 60_000 },
+    ...opts.app,
     notary: notaryWallet === undefined
       ? undefined
       : { wallet: notaryWallet, identityKey: notaryWallet.identityKey, config: opts.notary?.config, log: opts.notary?.log }

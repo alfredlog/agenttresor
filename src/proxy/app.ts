@@ -16,6 +16,7 @@ import { agentKeyHint, generateAgentKey, hashAgentKey, isAgentKey, maskAgentKey 
 import type { ChainTracker, PrivateKey, WalletInterface } from '../shared/bsv.js'
 import type { Broadcaster } from '../vault/broadcaster.js'
 import { PolicyKeys } from '../vault/keys.js'
+import { DEFAULT_COVENANT_MAX_FEE_SATS, parseCovenantScript, type CovenantCaps } from '../vault/covenant.js'
 import { VaultService } from '../vault/service.js'
 import { VaultStore } from '../vault/store.js'
 import { AuditLog } from '../audit/log.js'
@@ -47,6 +48,12 @@ export interface ProxyAppOptions {
   connectRateLimit?: { max: number, windowMs: number }
   /** Put an anchor of the audit log head into every vault payment (option A, default true). */
   anchorPayments?: boolean
+  /** VAULT_COVENANT: NEW agent vaults are v2, capped on chain at the agent's maxPerPaymentSats (default false). */
+  vaultCovenant?: boolean
+  /** VAULT_COVENANT_MAX_FEE_SATS: the most fee a v2 payment may pay (default 1000). */
+  vaultCovenantMaxFeeSats?: number
+  /** Operational log lines (no secrets). */
+  log?: (msg: string) => void
   /** The operator's notary wallet (option B): anchors the log when it is idle. Without it there is no idle anchoring. */
   notary?: { wallet: WalletInterface, identityKey: string, config?: Partial<NotaryConfig>, log?: (msg: string) => void }
   /** Why there is no notary, shown on the dashboard (e.g. NOTARY_ROOT_KEY is not set). */
@@ -61,6 +68,11 @@ export function notaryOf (app: Express): Notary | undefined {
 const PUBLIC_DIR = fileURLToPath(new URL('../../public', import.meta.url))
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 const iso = (ms: number | null): string | null => ms === null ? null : new Date(ms).toISOString()
+/** The on-chain caps of a v2 vault, or null for a v1 (or not yet funded) vault. */
+function covenantOf (lockingScript: string | null): CovenantCaps | null {
+  const v2 = lockingScript === null ? undefined : parseCovenantScript(lockingScript)
+  return v2 === undefined ? null : { maxSats: v2.maxSats, maxFeeSats: v2.maxFeeSats }
+}
 
 function requestView (r: PaymentRequestRecord): Record<string, unknown> {
   return {
@@ -130,7 +142,11 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     broadcaster: opts.broadcaster,
     audit,
     now,
-    anchorPayments: opts.anchorPayments ?? true
+    anchorPayments: opts.anchorPayments ?? true,
+    covenantCaps: opts.vaultCovenant === true
+      ? async agentId => ({ maxSats: (await store.getRules(agentId)).maxPerPaymentSats, maxFeeSats: opts.vaultCovenantMaxFeeSats ?? DEFAULT_COVENANT_MAX_FEE_SATS })
+      : undefined,
+    log: opts.log
   })
   const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now })
   const notary = opts.notary === undefined
@@ -347,8 +363,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
           createdAt: iso(a.createdAt),
           rules: await store.getRules(a.id),
           vault: v === undefined
-            ? { status: 'no_key', satoshis: 0, agentPub: null }
-            : { status: v.status, satoshis: v.status === 'open' ? v.satoshis : 0, agentPub: v.agentPub }
+            ? { status: 'no_key', satoshis: 0, agentPub: null, covenant: null }
+            : { status: v.status, satoshis: v.status === 'open' ? v.satoshis : 0, agentPub: v.agentPub, covenant: covenantOf(v.lockingScript) }
         }
       }))
     })
@@ -421,6 +437,8 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         status: v.status,
         satoshis: v.status === 'open' ? v.satoshis : 0,
         outpoint: v.status === 'open' ? `${v.txid!}.${v.vout!}` : null,
+        // v2: the most output 0 of a payment may carry, and the most fee, enforced by every node.
+        covenant: covenantOf(v.lockingScript),
         explorerUrl: v.txid === null ? null : txLink(v.txid, network)
       }))
     })

@@ -19,6 +19,7 @@ import { anchorLockingScript, parseAnchorScript } from '../audit/anchor-script.j
 import type { AuditLog } from '../audit/log.js'
 import { ProxyError } from '../proxy/errors.js'
 import type { Broadcaster } from './broadcaster.js'
+import { covenantUnlockingScript, parseCovenantScript, type CovenantCaps } from './covenant.js'
 import { buildRequestVaultPayment, buildVaultPayment, PLACEHOLDER_ANCHOR, requestVaultFee, type VaultOutpoint } from './builder.js'
 import type { PolicyKeys } from './keys.js'
 import { VAULT_PROTOCOL, vaultKeyId } from './protocol.js'
@@ -57,6 +58,13 @@ export interface VaultServiceOptions {
   now: () => number
   /** Put an anchor of the audit log head into every payment (default true; agents older than this refuse to sign it). */
   anchorPayments?: boolean
+  /**
+   * VAULT_COVENANT: the caps a NEW agent vault gets as a v2 covenant (the
+   * agent's maxPerPaymentSats, and the fee cap), or undefined for a v1 vault.
+   * Request vaults stay v1.
+   */
+  covenantCaps?: (agentId: string) => Promise<CovenantCaps | undefined>
+  log?: (msg: string) => void
 }
 
 const isCompressedPubHex = (v: unknown): v is string => typeof v === 'string' && /^0[23][0-9a-f]{64}$/.test(v)
@@ -106,6 +114,8 @@ export class VaultService {
   private readonly audit: AuditLog
   private readonly now: () => number
   private readonly anchorPayments: boolean
+  private readonly covenantCaps: (agentId: string) => Promise<CovenantCaps | undefined>
+  private readonly log: (msg: string) => void
 
   constructor (opts: VaultServiceOptions) {
     this.store = opts.store
@@ -115,6 +125,8 @@ export class VaultService {
     this.audit = opts.audit
     this.now = opts.now
     this.anchorPayments = opts.anchorPayments ?? true
+    this.covenantCaps = opts.covenantCaps ?? (async () => undefined)
+    this.log = opts.log ?? (() => {})
   }
 
   get senderIdentityKey (): string {
@@ -134,12 +146,23 @@ export class VaultService {
     })
   }
 
-  /** GET /admin/vaults/:agentId/params: what the company needs to build the vault script. */
-  async params (agentId: string): Promise<{ agentId: string, agentPub: string, policyPub: string, protocolID: typeof VAULT_PROTOCOL, keyID: string }> {
+  /**
+   * GET /admin/vaults/:agentId/params: what the company needs to build the vault
+   * script. `covenant` is set when new vaults are v2 (VAULT_COVENANT=true).
+   */
+  async params (agentId: string): Promise<{ agentId: string, agentPub: string, policyPub: string, protocolID: typeof VAULT_PROTOCOL, keyID: string, covenant: CovenantCaps | null }> {
     const vault = await this.store.getVault(agentId)
     if (vault === undefined) throw new ProxyError(409, 'the agent has not registered its public key yet')
     if (vault.status === 'open') throw new ProxyError(409, 'the vault is already funded; reclaim it before funding again')
-    return { agentId, agentPub: vault.agentPub, policyPub: this.policy.policyPub(agentId), protocolID: VAULT_PROTOCOL, keyID: vaultKeyId(agentId) }
+    const caps = await this.covenantCaps(agentId)
+    return {
+      agentId,
+      agentPub: vault.agentPub,
+      policyPub: this.policy.policyPub(agentId),
+      protocolID: VAULT_PROTOCOL,
+      keyID: vaultKeyId(agentId),
+      covenant: caps ?? null
+    }
   }
 
   /** POST /admin/vaults/:agentId/funded: verify the funding transaction with SPV and the script, then open the vault. */
@@ -147,7 +170,8 @@ export class VaultService {
     const vault = await this.store.getVault(agentId)
     if (vault === undefined) throw new ProxyError(409, 'the agent has not registered its public key yet')
     if (vault.status === 'open') throw new ProxyError(409, 'the vault is already funded')
-    const f = await this.verifyFunding(agentId, vault.agentPub, body)
+    const covenant = await this.covenantCaps(agentId) !== undefined
+    const f = await this.verifyFunding(agentId, vault.agentPub, body, covenant)
     if (f.satoshis < 1) throw new ProxyError(400, 'the vault output holds no satoshis')
 
     // The SPV check above is network I/O, so it runs before the transaction; the vault is re-read inside it.
@@ -156,7 +180,9 @@ export class VaultService {
       if (current?.status === 'open' || current?.agentPub !== vault.agentPub) throw new ProxyError(409, 'the vault changed while the funding was checked')
       const now = this.now()
       await store.insertTx({ ...emptyTx(agentId, now), kind: 'fund', status: 'done', txid: f.txid, priceSats: f.satoshis })
-      await audit.append('company', 'vault.funded', { agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, agentFingerprint: fingerprint(vault.agentPub) })
+      await audit.append('company', 'vault.funded', {
+        agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, agentFingerprint: fingerprint(vault.agentPub), covenant: f.covenant ?? undefined
+      })
       return await store.updateVault(agentId, {
         companyPub: f.companyPub,
         lockingScript: f.lockingScript,
@@ -189,7 +215,7 @@ export class VaultService {
     if (await this.store.getRequestVault(requestId) !== undefined) throw new ProxyError(409, 'this request is already funded')
     const vault = await this.store.getVault(agentId)
     if (vault === undefined) throw new ProxyError(409, 'the agent has not registered its public key yet')
-    const f = await this.verifyFunding(agentId, vault.agentPub, body)
+    const f = await this.verifyFunding(agentId, vault.agentPub, body, false)
     if (vault.companyPub !== null && f.companyPub !== vault.companyPub) {
       throw new ProxyError(400, 'companyPub differs from the company key of this agent\'s vault')
     }
@@ -303,7 +329,10 @@ export class VaultService {
   async capacityProblem (agentId: string, sats: number): Promise<string | undefined> {
     const vault = await this.store.getVault(agentId)
     if (vault?.status !== 'open') return 'the agent has no funded vault'
+    const caps = parseCovenantScript(vault.lockingScript!)
+    if (caps !== undefined && sats > caps.maxSats) return `the vault's covenant caps a payment at ${caps.maxSats} sats; reclaim and fund it again to raise the cap`
     const { feeSats, changeSats } = await buildVaultPayment(outpointOf(vault), sats, undefined, this.anchorPayments ? PLACEHOLDER_ANCHOR : undefined)
+    if (caps !== undefined && feeSats > caps.maxFeeSats) return `the fee of ${feeSats} sats is above the vault's covenant fee cap of ${caps.maxFeeSats} sats`
     // At least 1 sat stays in the vault, so it always has an output to spend next.
     if (changeSats < 1) return `vault balance too low: ${sats} + ${feeSats} fee needs more than the ${vault.satoshis!} sats in the vault`
     return undefined
@@ -332,11 +361,15 @@ export class VaultService {
   async prepare (agentId: string, requestId: string, sats: number, serverKey: string): Promise<SignRequest> {
     if (await this.inFlight(agentId) !== undefined) throw new ProxyError(409, 'a vault payment is already waiting for a signature', { code: 'SIGNATURE_PENDING' })
     const vault = await this.openVault(agentId)
+    const caps = parseCovenantScript(vault.lockingScript!)
+    if (caps !== undefined && sats > caps.maxSats) throw new ProxyError(403, `the vault's covenant caps a payment at ${caps.maxSats} sats`)
 
     const now = this.now()
     const { nonce, time, merchantScript } = this.merchantOutput(serverKey, now)
-    const { tx, feeSats, changeSats } = await buildVaultPayment(outpointOf(vault), sats, merchantScript, await this.headAnchor())
+    const { tx, feeSats, changeSats, grindTries } = await buildVaultPayment(outpointOf(vault), sats, merchantScript, await this.headAnchor())
     if (changeSats < 1) throw new ProxyError(403, `vault balance too low: ${sats} + ${feeSats} fee needs more than the ${vault.satoshis!} sats in the vault`)
+    if (caps !== undefined && feeSats > caps.maxFeeSats) throw new ProxyError(403, `the fee of ${feeSats} sats is above the vault's covenant fee cap of ${caps.maxFeeSats} sats`)
+    if (grindTries > 0) this.log(`vault ${agentId}: covenant payment ground in ${grindTries} ${grindTries === 1 ? 'try' : 'tries'} (nLockTime ${tx.lockTime})`)
 
     const unsignedTx = tx.toHex()
     await this.store.insertTx({
@@ -438,7 +471,10 @@ export class VaultService {
 
     const beef = Beef.fromString(source.beefHex, 'hex')
     tx.inputs[0].sourceTransaction = beef.findAtomicTransaction(source.txid)
-    tx.inputs[0].unlockingScript = spendUnlockingScript(policySig, agentSig)
+    // v2 also pushes the outputs and the preimage for the covenant (the transaction was ground when built).
+    tx.inputs[0].unlockingScript = parseCovenantScript(lockingScript) === undefined
+      ? spendUnlockingScript(policySig, agentSig)
+      : covenantUnlockingScript(policySig, agentSig, tx, 0, source.satoshis, lockingScript)
     beef.mergeTransaction(tx)
     const txid = tx.id('hex')
     const atomicBeef = beef.toBinaryAtomic(txid)
@@ -526,8 +562,14 @@ export class VaultService {
     return { nonce, time, merchantScript: new P2PKH().lock(this.policy.merchantPaymentKey(serverKey, keyID).toHash()) }
   }
 
-  /** SPV, then the exact vault script of this agent (agent + policy | company). */
-  private async verifyFunding (agentId: string, agentPub: string, body: FundingBody): Promise<{ txid: string, vout: number, satoshis: number, lockingScript: string, companyPub: string, beefHex: string }> {
+  /**
+   * SPV, then the exact vault script of this agent (agent + policy | company).
+   * With `covenant`, a v2 script with these keys; its cap is the company's
+   * choice (it built the script) and is returned.
+   */
+  private async verifyFunding (
+    agentId: string, agentPub: string, body: FundingBody, wantCovenant: boolean
+  ): Promise<{ txid: string, vout: number, satoshis: number, lockingScript: string, companyPub: string, beefHex: string, covenant: CovenantCaps | null }> {
     if (typeof body.beef !== 'string' || !/^([0-9a-f]{2})+$/i.test(body.beef)) throw new ProxyError(400, 'beef must be AtomicBEEF hex')
     if (!Number.isSafeInteger(body.vout) || (body.vout as number) < 0) throw new ProxyError(400, 'vout must be an output index')
     if (!isCompressedPubHex(body.companyPub)) throw new ProxyError(400, 'companyPub must be a compressed public key')
@@ -543,18 +585,26 @@ export class VaultService {
     try { valid = await tx.verify(this.chainTracker) } catch {}
     if (!valid) throw new ProxyError(400, 'the funding transaction failed SPV verification')
 
-    const expected = vaultLockingScript({ agentPub, policyPub: this.policy.policyPub(agentId), companyPub: body.companyPub })
+    const keys = { agentPub, policyPub: this.policy.policyPub(agentId), companyPub: body.companyPub }
     const output = tx.outputs[vout]
-    if (output === undefined || output.lockingScript.toHex() !== expected.toHex()) {
+    let covenant: CovenantCaps | null = null
+    if (wantCovenant) {
+      const v2 = output === undefined ? undefined : parseCovenantScript(output.lockingScript)
+      if (v2 === undefined || v2.agentPub !== keys.agentPub || v2.policyPub !== keys.policyPub || v2.companyPub !== keys.companyPub) {
+        throw new ProxyError(400, 'the funded output is not this agent\'s v2 (covenant) vault script')
+      }
+      covenant = { maxSats: v2.maxSats, maxFeeSats: v2.maxFeeSats }
+    } else if (output === undefined || output.lockingScript.toHex() !== vaultLockingScript(keys).toHex()) {
       throw new ProxyError(400, 'the funded output is not this agent\'s vault script')
     }
     return {
       txid: tx.id('hex'),
       vout,
       satoshis: output.satoshis ?? 0,
-      lockingScript: expected.toHex(),
+      lockingScript: output.lockingScript.toHex(),
       companyPub: body.companyPub,
-      beefHex: Beef.fromBinary(Utils.toArray(body.beef, 'hex')).toHex()
+      beefHex: Beef.fromBinary(Utils.toArray(body.beef, 'hex')).toHex(),
+      covenant
     }
   }
 

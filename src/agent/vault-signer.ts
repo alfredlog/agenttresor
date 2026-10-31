@@ -4,7 +4,9 @@
  * against what it asked for and only then signs it with its own key.
  *
  * Checked before signing:
- *  - exactly one input, locked by a vault script that names this agent's key;
+ *  - exactly one input, locked by a vault script (v1, or v2 with its covenant)
+ *    that names this agent's key; for v2, the price is at most the covenant's
+ *    MAX_SATS and the fee at most its MAX_FEE (the network would refuse more anyway);
  *  - output 0 pays exactly the price the agent expects, to the announced script;
  *  - either output 1 returns the change to the same vault script (the agent's
  *    vault), or there is no output 1 (a request vault the company funded for
@@ -19,7 +21,8 @@
  */
 import { LockingScript, Transaction, type PrivateKey } from '../shared/bsv.js'
 import { parseAnchorScript } from '../audit/anchor-script.js'
-import { parseVaultScript, signVaultInput } from '../vault/script.js'
+import { parseVaultSource } from '../vault/covenant.js'
+import { signVaultInput } from '../vault/script.js'
 
 export interface VaultSignAnswer {
   status: 'sign'
@@ -44,9 +47,11 @@ export function signVaultPayment (answer: VaultSignAnswer, agentKey: PrivateKey,
   const refuse = (why: string): never => { throw new Error(`refusing to sign vault payment ${answer.requestId}: ${why}`) }
 
   if (answer.status !== 'sign') refuse(`status is ${String(answer.status)}`)
-  const vaultKeys = parseVaultScript(answer.sourceLockingScript)
-  if (vaultKeys === undefined) refuse('the input is not a vault script')
-  if (vaultKeys!.agentPub !== agentKey.toPublicKey().toString()) refuse('the vault does not belong to this agent key')
+  const vault = parseVaultSource(answer.sourceLockingScript)
+  if (vault === undefined) refuse('the input is not a vault script')
+  if (vault!.agentPub !== agentKey.toPublicKey().toString()) refuse('the vault does not belong to this agent key')
+  if (vault!.version === 2 && expectedPriceSats > vault!.maxSats) refuse(`the price ${expectedPriceSats} sats is above the vault's covenant cap of ${vault!.maxSats} sats`)
+  const covenantMaxFee = vault!.version === 2 ? vault!.maxFeeSats : Infinity
 
   const tx = Transaction.fromHex(answer.unsignedTx)
   if (tx.inputs.length !== 1) refuse(`expected 1 input, got ${tx.inputs.length}`)
@@ -69,6 +74,7 @@ export function signVaultPayment (answer: VaultSignAnswer, agentKey: PrivateKey,
   if (!Number.isSafeInteger(fee) || fee < 0) refuse('outputs exceed the vault balance')
   if (fee !== answer.feeSats) refuse(`fee is ${fee} sats, announced ${answer.feeSats}`)
   if (fee > maxFeeSats) refuse(`fee ${fee} sats is above the limit of ${maxFeeSats}`)
+  if (fee > covenantMaxFee) refuse(`fee ${fee} sats is above the vault's covenant fee cap of ${covenantMaxFee} sats`)
 
   return signVaultInput(agentKey, tx, 0, answer.sourceSatoshis, LockingScript.fromHex(answer.sourceLockingScript)).toDER('hex') as string
 }

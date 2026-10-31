@@ -315,7 +315,7 @@
           <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
           <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
             max ${esc(a.rules.maxPerPaymentSats)} · daily ${esc(a.rules.dailyBudgetSats)} · approval above ${esc(a.rules.approvalThresholdSats)} sats</td>
-          <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}</td>
+          <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}${a.vault.covenant == null || a.vault.status !== 'open' ? '' : `<br><span class="muted hint">v2 covenant: max ${esc(a.vault.covenant.maxSats)} sats per payment, fee at most ${esc(a.vault.covenant.maxFeeSats)} sats, change locked to the vault</span>`}</td>
           <td class="agent-actions">${agentActions(a)}</td></tr>`).join('')
   }
 
