@@ -213,11 +213,16 @@ describe('authentication', () => {
     expect((await h.call(`/v1/requests/${id}/sign`, a.key, { method: 'POST', body: { signature: '00' } })).status).toBe(404)
   })
 
-  it('returns the key once; the agents list never contains a key or its hash', async () => {
-    const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'masked-bot', rules: { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 } } })
+  it('creation returns a code, not a key; the agents list never contains a key or its hash', async () => {
+    const r = { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 }
+    const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'masked-bot', rules: r } })
     expect(created.status).toBe(201)
-    expect(created.body.apiKey).toMatch(/^agt_[0-9a-f]{64}$/)
-    const apiKey: string = created.body.apiKey
+    expect(Object.keys(created.body).sort()).toEqual(['connectCode', 'connectUrl', 'expiresAt', 'id', 'name', 'rules'])
+    expect(JSON.stringify(created.body)).not.toMatch(/agt_/)
+    expect((await h.admin('/admin/agents')).body.agents.find((x: any) => x.id === created.body.id)).toMatchObject({ key: null, connected: false })
+
+    const apiKey: string = (await h.call('/v1/connect', undefined, { method: 'POST', body: { code: created.body.connectCode } })).body.apiKey
+    expect(apiKey).toMatch(/^agt_[0-9a-f]{64}$/)
     const hash = createHash('sha256').update(apiKey).digest('hex')
 
     const list = await h.admin('/admin/agents')
@@ -230,7 +235,9 @@ describe('authentication', () => {
     expect(listed).toEqual({
       id: created.body.id,
       name: 'masked-bot',
+      status: 'active',
       key: `${apiKey.slice(0, 8)}…`,
+      connected: true,
       createdAt: expect.any(String),
       rules: { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 },
       vault: { status: 'no_key', satoshis: 0, agentPub: null }

@@ -20,7 +20,8 @@ export const GENESIS_HASH = '0'.repeat(64)
 export type AuditActor = 'rules' | 'admin' | 'company' | `agent:${string}`
 
 export type AuditType =
-  | 'agent.created' | 'agent.rules_changed' | 'agent.key_registered'
+  | 'agent.created' | 'agent.rules_changed' | 'agent.key_registered' | 'agent.connect_code_issued' | 'agent.connected'
+  | 'agent.disabled' | 'agent.enabled' | 'agent.deleted'
   | 'request.created' | 'request.decided' | 'request.paid' | 'request.paid_not_delivered' | 'request.failed' | 'request.expired'
   | 'vault.funded' | 'vault.payment' | 'vault.reclaimed'
   | 'request_vault.funded' | 'request_vault.reclaimed'
@@ -107,31 +108,99 @@ const toEntry = (r: any): AuditEntry => ({
   seq: r.seq, at: r.at, actor: r.actor, type: r.type, data: JSON.parse(r.data), prevHash: r.prev_hash, hash: r.hash
 })
 
+/** The last entry the chain was verified up to (kept in memory, shared by every binding of one log). */
+interface VerifiedMark { seq: number, hash: string }
+
+export interface AuditStatus {
+  seq: number
+  hash: string
+  /** Entries after the latest anchor, not counting the anchor's own record. */
+  unanchoredEntries: number
+  latestAnchorSeq: number | null
+  /** The log has fewer entries than an anchor covers: its newest entries were deleted. */
+  chainShorterThanAnchor: boolean
+}
+
+export interface AuditVerifyReport {
+  ok: boolean
+  brokenAt?: number
+  reason?: string
+  /** 'incremental' re-checks only the entries after the last verified one; 'full' re-checks everything. */
+  mode: 'full' | 'incremental'
+  /** Entries in the log, and how many this run re-hashed. */
+  entries: number
+  checked: number
+  /** The chain is known good up to this seq (0 when nothing is). */
+  verifiedThrough: number
+  chainShorterThanAnchor: boolean
+  anchors: Array<AuditAnchor & { matches: boolean }>
+}
+
 export class AuditLog {
   private tail: Promise<unknown> = Promise.resolve()
 
-  constructor (private readonly db: Knex, private readonly now: () => number = Date.now) {}
+  constructor (
+    private readonly db: Knex,
+    private readonly now: () => number = Date.now,
+    private readonly state: { verified: VerifiedMark | null } = { verified: null },
+    private readonly inTransaction = false
+  ) {}
 
-  /** Appends one entry. Appends run one at a time, each in its own transaction. */
+  /**
+   * The same log, writing inside `trx`: the entry commits or rolls back with
+   * the state change it records.
+   */
+  with (trx: Knex.Transaction): AuditLog {
+    return new AuditLog(trx, this.now, this.state, true)
+  }
+
+  /** Runs `fn` with this log bound to one new transaction. */
+  async transaction<T> (fn: (audit: AuditLog) => Promise<T>): Promise<T> {
+    return await this.db.transaction(async trx => await fn(this.with(trx)))
+  }
+
+  /**
+   * Appends one entry. Inside a transaction (see with()) the single database
+   * connection serializes writers; on its own, appends are queued and each runs
+   * in its own transaction.
+   */
   async append (actor: AuditActor, type: AuditType, data: Record<string, unknown>): Promise<AuditEntry> {
     assertNoSecrets(data)
     // Drop undefined fields, exactly as the stored JSON will.
     const clean = JSON.parse(JSON.stringify(data)) as Record<string, unknown>
-    const run = this.tail.catch(() => {}).then(async () => await this.db.transaction(async trx => {
-      const last = await trx('audit_log').orderBy('seq', 'desc').first()
-      const prevHash: string = last?.hash ?? GENESIS_HASH
-      const entry = { seq: (last?.seq ?? 0) + 1, at: this.now(), actor, type, data: clean }
-      const hash = entryHash(prevHash, entry)
-      await trx('audit_log').insert({ ...entry, data: JSON.stringify(clean), prev_hash: prevHash, hash })
-      return { ...entry, prevHash, hash }
-    }))
+    if (this.inTransaction) return await this.insert(this.db, actor, type, clean)
+    const run = this.tail.catch(() => {}).then(async () => await this.db.transaction(async trx => await this.insert(trx, actor, type, clean)))
     this.tail = run
     return await run
+  }
+
+  private async insert (q: Knex, actor: string, type: string, data: Record<string, unknown>): Promise<AuditEntry> {
+    const last = await q('audit_log').orderBy('seq', 'desc').first()
+    const prevHash: string = last?.hash ?? GENESIS_HASH
+    const entry = { seq: (last?.seq ?? 0) + 1, at: this.now(), actor, type, data }
+    const hash = entryHash(prevHash, entry)
+    await q('audit_log').insert({ ...entry, data: JSON.stringify(data), prev_hash: prevHash, hash })
+    return { ...entry, prevHash, hash }
   }
 
   async head (): Promise<{ seq: number, hash: string }> {
     const last = await this.db('audit_log').orderBy('seq', 'desc').first()
     return { seq: last?.seq ?? 0, hash: last?.hash ?? GENESIS_HASH }
+  }
+
+  /** The head, and how much of the log no anchor covers yet. */
+  async status (): Promise<AuditStatus> {
+    const head = await this.head()
+    const latest = await this.db('audit_anchors').max({ seq: 'seq' }).first()
+    const latestAnchorSeq = (latest?.seq as number | null | undefined) ?? null
+    const unanchored = await this.db('audit_log').where('seq', '>', latestAnchorSeq ?? 0)
+      .whereNot({ type: 'audit.anchor_recorded' }).count({ n: '*' }).first()
+    return {
+      ...head,
+      unanchoredEntries: Number(unanchored?.n ?? 0),
+      latestAnchorSeq,
+      chainShorterThanAnchor: latestAnchorSeq !== null && head.seq < latestAnchorSeq
+    }
   }
 
   async get (seq: number): Promise<AuditEntry | undefined> {
@@ -161,11 +230,49 @@ export class AuditLog {
     return await this.db('audit_anchors').orderBy('seq', 'asc').select('seq', 'hash', 'txid', 'at')
   }
 
-  /** The whole chain, and whether every anchored hash still matches the entry at its seq. */
-  async verify (): Promise<ChainCheck & { anchors: Array<AuditAnchor & { matches: boolean }> }> {
-    const entries = await this.all()
-    const bySeq = new Map(entries.map(e => [e.seq, e.hash]))
-    const anchors = (await this.anchors()).map(a => ({ ...a, matches: bySeq.get(a.seq) === a.hash }))
-    return { ...verifyChain(entries, GENESIS_HASH), anchors }
+  /**
+   * Verifies the chain and every anchor. By default only the entries after the
+   * last verified one are re-hashed, after checking that this one is unchanged;
+   * any mismatch drops the mark and the next run re-checks everything.
+   * `full` always re-checks the whole chain.
+   */
+  async verify (opts: { full?: boolean } = {}): Promise<AuditVerifyReport> {
+    const count = Number((await this.db('audit_log').count({ n: '*' }).first())?.n ?? 0)
+    let mode: 'full' | 'incremental' = 'full'
+    let check: ChainCheck
+    let checked: number
+    const mark = opts.full === true ? null : this.state.verified
+    const markEntry = mark === null ? undefined : await this.get(mark.seq)
+
+    if (mark !== null && markEntry?.hash === mark.hash) {
+      mode = 'incremental'
+      const rest = await this.list(mark.seq, Number.MAX_SAFE_INTEGER)
+      checked = rest.length
+      check = rest.length > 0 && rest[0].seq !== mark.seq + 1
+        ? { ok: false, entries: rest.length, brokenAt: rest[0].seq, reason: `seq ${rest[0].seq} follows ${mark.seq}` }
+        : verifyChain(rest, mark.hash)
+    } else {
+      const all = await this.all()
+      checked = all.length
+      check = verifyChain(all, GENESIS_HASH)
+    }
+
+    const head = await this.head()
+    this.state.verified = check.ok && head.seq > 0 ? { seq: head.seq, hash: head.hash } : null
+
+    const anchorRows = await this.anchors()
+    const hashes = new Map((await this.db('audit_log').whereIn('seq', anchorRows.map(a => a.seq)).select('seq', 'hash')).map(r => [r.seq as number, r.hash as string]))
+    const anchors = anchorRows.map(a => ({ ...a, matches: hashes.get(a.seq) === a.hash }))
+    const latestAnchorSeq = anchorRows.reduce((m, a) => Math.max(m, a.seq), 0)
+    const chainShorterThanAnchor = latestAnchorSeq > head.seq
+
+    const report: AuditVerifyReport = {
+      ok: check.ok, mode, entries: count, checked, verifiedThrough: this.state.verified?.seq ?? 0, chainShorterThanAnchor, anchors
+    }
+    if (!check.ok) return { ...report, brokenAt: check.brokenAt, reason: check.reason }
+    if (chainShorterThanAnchor) {
+      return { ...report, ok: false, brokenAt: head.seq + 1, reason: `the log ends at #${head.seq} but anchor #${latestAnchorSeq} exists: its newest entries were deleted` }
+    }
+    return report
   }
 }

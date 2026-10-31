@@ -15,6 +15,7 @@ for (const a of report.anchors) {
   console.log(`anchor:    #${a.seq} ${a.matches ? 'matches' : 'DOES NOT MATCH'} the log (tx ${a.txid})`)
 }
 if (report.anchors.length === 0) console.log('anchors:   none yet (anchor the head from the dashboard)')
+else if (report.head.unanchoredEntries > 0) console.log(`unanchored: ${report.head.unanchoredEntries} entries after the latest anchor (anchor again to cover them)`)
 const allGood = report.ok && report.anchors.every(a => a.matches)
 console.log(allGood ? 'result:    OK' : 'result:    TAMPERED')
 process.exit(allGood ? 0 : 1)

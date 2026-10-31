@@ -10,6 +10,7 @@
 import { Beef, LockingScript, P2PKH, Random, Transaction, Utils, type ChainTracker } from '../shared/bsv.js'
 import type { PaymentHeaders } from '../shared/brc121.js'
 import { fingerprint } from '../shared/fingerprint.js'
+import type { Knex } from 'knex'
 import type { AuditLog } from '../audit/log.js'
 import { ProxyError } from '../proxy/errors.js'
 import type { Broadcaster } from './broadcaster.js'
@@ -66,6 +67,20 @@ interface SpendSource {
   beefHex: string
 }
 
+/** A request-vault funding that passed SPV, script and amount checks, not stored yet. */
+export interface VerifiedRequestFunding {
+  requestId: string
+  agentId: string
+  priceSats: number
+  agentPub: string
+  txid: string
+  vout: number
+  satoshis: number
+  lockingScript: string
+  companyPub: string
+  beefHex: string
+}
+
 export interface ReclaimableUtxo {
   outpoint: string
   satoshis: number
@@ -103,9 +118,11 @@ export class VaultService {
     const vault = await this.store.getVault(agentId)
     // The registered key is public; returning it lets an agent see whether its own key is the one in use.
     if (vault?.status === 'open') throw new ProxyError(409, 'the vault is funded with the current key; the company must reclaim it first', { code: 'VAULT_OPEN', agentPub: vault.agentPub })
-    await this.store.setAgentKey(agentId, publicKey, this.now())
-    await this.audit.append(`agent:${agentId}`, 'agent.key_registered', { agentId, agentPub: publicKey, fingerprint: fingerprint(publicKey) })
-    return (await this.store.getVault(agentId))!
+    return await this.inTransaction(async (store, audit) => {
+      await store.setAgentKey(agentId, publicKey, this.now())
+      await audit.append(`agent:${agentId}`, 'agent.key_registered', { agentId, agentPub: publicKey, fingerprint: fingerprint(publicKey) })
+      return (await store.getVault(agentId))!
+    })
   }
 
   /** GET /admin/vaults/:agentId/params: what the company needs to build the vault script. */
@@ -124,18 +141,23 @@ export class VaultService {
     const f = await this.verifyFunding(agentId, vault.agentPub, body)
     if (f.satoshis < 1) throw new ProxyError(400, 'the vault output holds no satoshis')
 
-    const now = this.now()
-    await this.store.insertTx({ ...emptyTx(agentId, now), kind: 'fund', status: 'done', txid: f.txid, priceSats: f.satoshis })
-    await this.audit.append('company', 'vault.funded', { agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, agentFingerprint: fingerprint(vault.agentPub) })
-    return await this.store.updateVault(agentId, {
-      companyPub: f.companyPub,
-      lockingScript: f.lockingScript,
-      status: 'open',
-      txid: f.txid,
-      vout: f.vout,
-      satoshis: f.satoshis,
-      beefHex: f.beefHex,
-      updatedAt: now
+    // The SPV check above is network I/O, so it runs before the transaction; the vault is re-read inside it.
+    return await this.inTransaction(async (store, audit) => {
+      const current = await store.getVault(agentId)
+      if (current?.status === 'open' || current?.agentPub !== vault.agentPub) throw new ProxyError(409, 'the vault changed while the funding was checked')
+      const now = this.now()
+      await store.insertTx({ ...emptyTx(agentId, now), kind: 'fund', status: 'done', txid: f.txid, priceSats: f.satoshis })
+      await audit.append('company', 'vault.funded', { agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, agentFingerprint: fingerprint(vault.agentPub) })
+      return await store.updateVault(agentId, {
+        companyPub: f.companyPub,
+        lockingScript: f.lockingScript,
+        status: 'open',
+        txid: f.txid,
+        vout: f.vout,
+        satoshis: f.satoshis,
+        beefHex: f.beefHex,
+        updatedAt: now
+      })
     })
   }
 
@@ -150,10 +172,11 @@ export class VaultService {
   }
 
   /**
-   * POST /admin/requests/:id/approve: the company funded a request vault for
-   * this payment. Checked by SPV, exact script and exact amount (price + fee).
+   * POST /admin/requests/:id/approve, step 1 (no writes): the company funded a
+   * request vault for this payment. Checked by SPV, exact script and exact
+   * amount (price + fee).
    */
-  async fundRequest (agentId: string, requestId: string, priceSats: number, body: FundingBody): Promise<RequestVault> {
+  async verifyRequestFunding (agentId: string, requestId: string, priceSats: number, body: FundingBody): Promise<VerifiedRequestFunding> {
     if (await this.store.getRequestVault(requestId) !== undefined) throw new ProxyError(409, 'this request is already funded')
     const vault = await this.store.getVault(agentId)
     if (vault === undefined) throw new ProxyError(409, 'the agent has not registered its public key yet')
@@ -163,26 +186,35 @@ export class VaultService {
     }
     const { totalSats } = await this.approvalInfo(agentId, priceSats)
     if (f.satoshis !== totalSats) throw new ProxyError(400, `the request vault holds ${f.satoshis} sats; approving this payment takes exactly ${totalSats}`)
+    return { requestId, agentId, priceSats, agentPub: vault.agentPub, ...f }
+  }
 
-    const now = this.now()
-    const rv: RequestVault = {
-      requestId,
-      agentId,
-      txid: f.txid,
-      vout: f.vout,
-      satoshis: f.satoshis,
-      lockingScript: f.lockingScript,
-      companyPub: f.companyPub,
-      beefHex: f.beefHex,
-      status: 'open',
-      closingTxid: null,
-      createdAt: now,
-      updatedAt: now
-    }
-    await this.store.insertRequestVault(rv)
-    await this.store.insertTx({ ...emptyTx(agentId, now), requestId, kind: 'fund', status: 'done', txid: f.txid, priceSats: f.satoshis })
-    await this.audit.append('company', 'request_vault.funded', { requestId, agentId, txid: f.txid, vout: f.vout, satoshis: f.satoshis, priceSats, agentFingerprint: fingerprint(vault.agentPub) })
-    return rv
+  /** Step 2: stores the request vault and its audit entry inside the caller's transaction (with the approval itself). */
+  async recordRequestFunding (trx: Knex.Transaction, v: VerifiedRequestFunding): Promise<RequestVault> {
+    return await this.inTransaction(async (store, audit) => {
+      if (await store.getRequestVault(v.requestId) !== undefined) throw new ProxyError(409, 'this request is already funded')
+      const now = this.now()
+      const rv: RequestVault = {
+        requestId: v.requestId,
+        agentId: v.agentId,
+        txid: v.txid,
+        vout: v.vout,
+        satoshis: v.satoshis,
+        lockingScript: v.lockingScript,
+        companyPub: v.companyPub,
+        beefHex: v.beefHex,
+        status: 'open',
+        closingTxid: null,
+        createdAt: now,
+        updatedAt: now
+      }
+      await store.insertRequestVault(rv)
+      await store.insertTx({ ...emptyTx(v.agentId, now), requestId: v.requestId, kind: 'fund', status: 'done', txid: v.txid, priceSats: v.satoshis })
+      await audit.append('company', 'request_vault.funded', {
+        requestId: v.requestId, agentId: v.agentId, txid: v.txid, vout: v.vout, satoshis: v.satoshis, priceSats: v.priceSats, agentFingerprint: fingerprint(v.agentPub)
+      })
+      return rv
+    }, trx)
   }
 
   async requestVault (requestId: string): Promise<RequestVault | undefined> {
@@ -207,16 +239,19 @@ export class VaultService {
   }
 
   /** POST /admin/request-vaults/:requestId/reclaimed: the company took the approval funds back. */
-  async markRequestVaultReclaimed (requestId: string, txid: unknown): Promise<RequestVault> {
+  async markRequestVaultReclaimed (requestId: string, txid: unknown, trx?: Knex.Transaction): Promise<RequestVault> {
     if (typeof txid !== 'string' || !/^[0-9a-f]{64}$/.test(txid)) throw new ProxyError(400, 'txid must be a transaction id')
-    const rv = await this.openRequestVault(requestId)
-    const now = this.now()
-    for (const attempt of await this.store.awaitingSignature(rv.agentId)) {
-      if (attempt.requestId === requestId) await this.store.updateTx(attempt.id, { status: 'failed', reason: 'request vault reclaimed', updatedAt: now })
-    }
-    await this.store.insertTx({ ...emptyTx(rv.agentId, now), requestId, kind: 'reclaim', status: 'done', txid, inputOutpoint: `${rv.txid}.${rv.vout}`, priceSats: rv.satoshis })
-    await this.audit.append('company', 'request_vault.reclaimed', { requestId, agentId: rv.agentId, txid, satoshis: rv.satoshis })
-    return await this.store.updateRequestVault(requestId, { status: 'reclaimed', closingTxid: txid, updatedAt: now })
+    return await this.inTransaction(async (store, audit) => {
+      const rv = await store.getRequestVault(requestId)
+      if (rv?.status !== 'open') throw new ProxyError(409, 'this request has no open request vault')
+      const now = this.now()
+      for (const attempt of await store.awaitingSignature(rv.agentId)) {
+        if (attempt.requestId === requestId) await store.updateTx(attempt.id, { status: 'failed', reason: 'request vault reclaimed', updatedAt: now })
+      }
+      await store.insertTx({ ...emptyTx(rv.agentId, now), requestId, kind: 'reclaim', status: 'done', txid, inputOutpoint: `${rv.txid}.${rv.vout}`, priceSats: rv.satoshis })
+      await audit.append('company', 'request_vault.reclaimed', { requestId, agentId: rv.agentId, txid, satoshis: rv.satoshis })
+      return await store.updateRequestVault(requestId, { status: 'reclaimed', closingTxid: txid, updatedAt: now })
+    }, trx)
   }
 
   /** GET /admin/vaults/:agentId/utxo: what the company needs to reclaim alone. */
@@ -235,14 +270,17 @@ export class VaultService {
   /** POST /admin/vaults/:agentId/reclaimed: the company took the funds back. */
   async markReclaimed (agentId: string, txid: unknown): Promise<Vault> {
     if (typeof txid !== 'string' || !/^[0-9a-f]{64}$/.test(txid)) throw new ProxyError(400, 'txid must be a transaction id')
-    const vault = await this.openVault(agentId)
-    const now = this.now()
-    for (const attempt of await this.store.awaitingSignature(agentId)) {
-      await this.store.updateTx(attempt.id, { status: 'failed', reason: 'vault reclaimed', updatedAt: now })
-    }
-    await this.store.insertTx({ ...emptyTx(agentId, now), kind: 'reclaim', status: 'done', txid, inputOutpoint: `${vault.txid!}.${vault.vout!}`, priceSats: vault.satoshis })
-    await this.audit.append('company', 'vault.reclaimed', { agentId, txid, satoshis: vault.satoshis })
-    return await this.store.updateVault(agentId, { status: 'closed', updatedAt: now })
+    return await this.inTransaction(async (store, audit) => {
+      const vault = await store.getVault(agentId)
+      if (vault?.status !== 'open') throw new ProxyError(409, 'the agent has no funded vault')
+      const now = this.now()
+      for (const attempt of await store.awaitingSignature(agentId)) {
+        await store.updateTx(attempt.id, { status: 'failed', reason: 'vault reclaimed', updatedAt: now })
+      }
+      await store.insertTx({ ...emptyTx(agentId, now), kind: 'reclaim', status: 'done', txid, inputOutpoint: `${vault.txid!}.${vault.vout!}`, priceSats: vault.satoshis })
+      await audit.append('company', 'vault.reclaimed', { agentId, txid, satoshis: vault.satoshis })
+      return await store.updateVault(agentId, { status: 'closed', updatedAt: now })
+    })
   }
 
   async balance (agentId: string): Promise<{ status: string, satoshis: number, outpoint: string | null }> {
@@ -352,7 +390,10 @@ export class VaultService {
    * The agent's vault moves to its change output; a request vault is closed.
    * Returns the BRC-121 payment headers.
    */
-  async finalize (agentId: string, requestId: string, signatureHex: unknown): Promise<FinalizedPayment> {
+  async finalize (
+    agentId: string, requestId: string, signatureHex: unknown,
+    alsoInTransaction?: (trx: Knex.Transaction, payment: { txid: string, priceSats: number }) => Promise<void>
+  ): Promise<FinalizedPayment> {
     const now = this.now()
     const attempt = (await this.store.awaitingSignature(agentId)).find(a => a.requestId === requestId)
     if (attempt === undefined) throw new ProxyError(409, 'no payment is waiting for a signature for this request; call execute again', { code: 'SIGN_WINDOW_EXPIRED' })
@@ -395,16 +436,21 @@ export class VaultService {
       throw new ProxyError(502, `broadcast failed: ${errorMessage(err)}`)
     }
 
-    await this.store.updateTx(attempt.id, { status: 'broadcast', txid, updatedAt: now })
-    // Signed by the agent and the policy: recorded as the agent's payment, from whichever vault it spent.
-    await this.audit.append(`agent:${agentId}`, 'vault.payment', {
-      agentId, requestId, from: source.kind === 'request' ? 'request_vault' : 'agent_vault', txid, priceSats: attempt.priceSats, feeSats: attempt.feeSats
+    // The broadcast cannot be undone: from here the vault state, its audit entry and the caller's
+    // own record of the payment (alsoInTransaction) are written together.
+    await this.inTransaction(async (store, audit, trx) => {
+      await store.updateTx(attempt.id, { status: 'broadcast', txid, updatedAt: now })
+      // Signed by the agent and the policy: recorded as the agent's payment, from whichever vault it spent.
+      await audit.append(`agent:${agentId}`, 'vault.payment', {
+        agentId, requestId, from: source.kind === 'request' ? 'request_vault' : 'agent_vault', txid, priceSats: attempt.priceSats, feeSats: attempt.feeSats
+      })
+      if (source.kind === 'request') {
+        await store.updateRequestVault(requestId, { status: 'spent', closingTxid: txid, updatedAt: now })
+      } else {
+        await store.updateVault(agentId, { txid, vout: 1, satoshis: attempt.changeSats!, beefHex: beef.toHex(), updatedAt: now })
+      }
+      if (alsoInTransaction !== undefined) await alsoInTransaction(trx, { txid, priceSats: attempt.priceSats! })
     })
-    if (source.kind === 'request') {
-      await this.store.updateRequestVault(requestId, { status: 'spent', closingTxid: txid, updatedAt: now })
-    } else {
-      await this.store.updateVault(agentId, { txid, vout: 1, satoshis: attempt.changeSats!, beefHex: beef.toHex(), updatedAt: now })
-    }
     return {
       txid,
       priceSats: attempt.priceSats!,
@@ -421,6 +467,16 @@ export class VaultService {
 
   async listVaults (): ReturnType<VaultStore['listVaults']> {
     return await this.store.listVaults()
+  }
+
+  /**
+   * Runs `fn` with the vault store and the audit log bound to one transaction:
+   * the caller's `trx` if given, else a new one. Inside, use only the bound
+   * store and log: the database has a single connection.
+   */
+  private async inTransaction<T> (fn: (store: VaultStore, audit: AuditLog, trx: Knex.Transaction) => Promise<T>, trx?: Knex.Transaction): Promise<T> {
+    if (trx !== undefined) return await fn(this.store.with(trx), this.audit.with(trx), trx)
+    return await this.store.transaction(async t => await fn(this.store.with(t), this.audit.with(t), t))
   }
 
   /** The UTXO this request's payment spends: its open request vault if it has one, else the agent's open vault. */

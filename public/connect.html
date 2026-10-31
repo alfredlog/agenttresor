@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect an Agent</title>
+  <style>
+    :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --card: #fff; --accent: #2b59c3; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --card: #1f1f1d; --accent: #8fb0ff; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+    main { max-width: 640px; margin: 0 auto; padding: 32px 16px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-top: 16px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    button { font: inherit; padding: 6px 12px; border: 1px solid var(--accent); color: var(--accent); background: var(--card); border-radius: 6px; cursor: pointer; }
+    .muted { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Connect an AgentTresor agent</h1>
+  <p class="muted">Run this once in the agent's project folder, on the agent's own machine. The code works once, for 10 minutes.</p>
+  <div class="card">
+    <code id="command">No connection code in this link.</code>
+    <div class="row"><button id="copy" hidden>Copy</button></div>
+  </div>
+  <p class="muted">It saves the agent's settings in <code>mcp-data/agent-config.json</code>, creates the agent's own signing key and prints its fingerprint: check that fingerprint on the vault page before funding the agent.</p>
+</main>
+<script>
+  // The code travels in the #fragment, which browsers never send to the server.
+  const copy = document.getElementById('copy')
+  let command = ''
+  function show () {
+    let code = ''
+    try { code = decodeURIComponent(location.hash.slice(1)).trim() } catch {}
+    const valid = /^AT-[0-9A-Z]{4}-[0-9A-Z]{4}$/i.test(code)
+    command = valid ? `npm run connect ${code.toUpperCase()} -- --proxy ${location.origin}` : ''
+    document.getElementById('command').textContent = valid ? command : 'No connection code in this link.'
+    copy.hidden = !valid
+    copy.textContent = 'Copy'
+  }
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(command); copy.textContent = 'Copied' } catch { copy.textContent = 'Select and copy it' }
+  })
+  window.addEventListener('hashchange', show)
+  show()
+</script>
+</body>
+</html>

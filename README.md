@@ -15,7 +15,7 @@ npm test               # offline, on wallet-toolbox's mock chain
 npm run typecheck
 npm run merchant       # demo merchant on MERCHANT_PORT (default 5080)
 npm run proxy          # spend-control proxy + dashboard on PROXY_PORT (default 5050)
-npm run mcp:http       # the agent's MCP server over HTTP on MCP_PORT (default 5070)
+npm run setup <code>   # on the agent's machine: connect + run the agent service on MCP_PORT (default 5070)
 ```
 
 ## The three parties
@@ -24,7 +24,7 @@ npm run mcp:http       # the agent's MCP server over HTTP on MCP_PORT (default 5
 |---|---|---|---|
 | **Company** (BSV Desktop) | the money, and the company key in its wallet | fund vaults; approve a payment by funding it; **reclaim** any unspent vault at any time | pay a merchant on the agent's behalf |
 | **Proxy** (spend control) | the policy key (`PROXY_ROOT_KEY`), no funds | price each request, apply the rules, keep the ledger, add the second signature | move a single satoshi (the policy key is never enough on its own) |
-| **Agent** (MCP server) | its own key (`mcp-data/agent-key.json`) | ask, check what it is asked to sign, sign | move funds without the proxy, or pay more than the price it checked itself |
+| **Agent** (local service) | its own key (`mcp-data/agents/<id>/agent-key.json`) | ask, check what it is asked to sign, sign | move funds without the proxy, or pay more than the price it checked itself |
 
 Every vault UTXO is locked by the same script, with derived keys (`[1, 'agenttresor vault']`, keyID `agent-<id>`):
 
@@ -36,8 +36,8 @@ OP_ENDIF
 
 ## How a payment works
 
-The company creates the agent on the dashboard (`/`: name and rules; the `agt_…` API key is shown once, for the
-agent's `.env`). The agent runs `npm run mcp` on its own machine: it creates its signing key, registers the public key
+The company creates the agent on the dashboard (`/`: name and rules) and gives it a one-time connection code. The
+agent runs `npm run setup <code>` on its own machine: it creates its signing key, registers the public key
 (`POST /v1/vault/agent-key`) and prints `Agent key fingerprint: XXXX-XXXX-XXXX`. The company funds the agent's vault
 on `/vault.html` only after checking that the fingerprint shown there, computed in the browser from the registered
 key, is the same as on the agent's machine (`src/shared/fingerprint.ts`: first 6 bytes of sha256 of the compressed
@@ -80,55 +80,167 @@ the company anchors the head on BSV from its own wallet (dashboard: *Anchor now 
 `src/company/audit-client.ts`): one 0-sat output `OP_FALSE OP_RETURN "agenttresor-audit" <hash> <seq>`. The proxy pays
 nothing; it checks the transaction by SPV and that the hash is the one at that seq, then records the anchor.
 
-- `GET /admin/audit?after=&limit=` — entries and anchors (with WhatsOnChain links); `GET /admin/audit/head`
-- `GET /admin/audit/verify` — the chain, and for each anchor whether the log still matches it
-- `npm run audit:verify [-- path/to/proxy.sqlite]` — the same check from the command line (exit code 1 if tampered)
+- `GET /admin/audit?after=&limit=` — entries and anchors (with WhatsOnChain links)
+- `GET /admin/audit/head` — `{seq, hash, unanchoredEntries, latestAnchorSeq, chainShorterThanAnchor}`
+- `GET /admin/audit/verify` — incremental: re-hashes only the entries after the last verified one (after checking that
+  one is unchanged; any mismatch falls back to a full check). `?full=1` re-checks the whole chain. Both also check
+  every anchor and whether the log is shorter than the latest anchor.
+- `npm run audit:verify [-- path/to/proxy.sqlite]` — a full check from the command line (exit code 1 if tampered)
 
-## The AI agent (MCP server)
+Every state change and its audit entry are written in one database transaction: if the entry cannot be written,
+the change is rolled back too.
 
-`src/mcp/` is an MCP server that an AI agent (Claude Desktop, Claude Code…) uses to pay for services. It holds
-the agent's own signing key: on first start it creates `mcp-data/agent-key.json` (mode 0600, gitignored) and
-registers the public key with the proxy. The company then funds the agent's vault on `/vault.html`.
+### Known limits
 
-Tools: `list_services`, `check_budget`, `get_price`, `pay_and_fetch {url, method?, body?, purpose, maxSats}`,
-`check_request {requestId}` and `show_agent_key` (the key fingerprint the company checks before funding; the server
-also prints it to stderr on start). For each payment the agent asks the merchant's price itself, refuses above `maxSats`,
-and signs the vault transaction only if output 0 pays exactly that price (`src/agent/pay.ts`). A payment above the
-approval threshold comes back `pending` with a request id; once the company approves it, `check_request` pays it.
+- **A payment is broadcast before its database transaction.** The vault state, the `vault.payment` entry and the
+  request's "paid" record commit together, but after the broadcast, which cannot be rolled back. If that transaction
+  fails (disk full, crash), the payment is on chain without a record; it then has to be reconciled from the txid.
+- **The dashboard's verify is incremental.** It catches new entries and a changed last-verified entry, not an edit
+  to an older entry: use *Verify full chain* or `npm run audit:verify` for that. The verified mark lives in memory, so
+  the first check after a restart is a full one.
+- **Only anchored entries are protected against deletion.** Deleting entries up to an anchor is reported (the log is
+  shorter than the anchor), but entries after the latest anchor can be removed without trace. The dashboard shows how
+  many are not anchored yet: anchor often.
+- **One proxy process per database.** Appends, the per-agent locks and the verified mark are per process.
 
-Settings come from the environment or the project's `.env`: `PROXY_URL`, `AGENT_API_KEY` (the `agt_…` key from
-`POST /admin/agents`), `MERCHANT_URLS`, `MCP_DATA_DIR`; for HTTP also `MCP_TOKEN`, `MCP_PORT`, `MCP_HOST`.
+## Connect an agent in 30 seconds
 
-**Claude Desktop** (`claude_desktop_config.json`, stdio). Use `--silent`: on stdio, stdout belongs to the protocol.
-Claude Desktop may not see your shell's `PATH`; if `npm` is not found, give its absolute path (`which npm`).
+1. **Admin, on the dashboard** (`/`): *New agent* with its name and rules. The dashboard shows a one-time code
+   (`AT-XXXX-XXXX`, valid 10 minutes, usable once) and the exact command, with a Copy button.
+2. **On the agent's machine**, in a checkout of this project (`npm install` once):
+   ```bash
+   npm run setup AT-XXXX-XXXX -- --proxy https://your-proxy.example
+   ```
+   It adds the agent's profile (`mcp-data/agents/<agentId>/`: settings and the agent's own signing key, mode 0600),
+   registers the key, starts the agent service (see [Run the agent](#run-the-agent)) and prints
+   `Agent key fingerprint: XXXX-XXXX-XXXX`. The API key is never printed. The link form works too:
+   `npm run setup "https://your-proxy.example/connect#AT-XXXX-XXXX"`. `npm run connect` does the same without
+   touching the service.
+3. **Admin, on `/vault.html`**: check that the fingerprint shown there is the one the agent printed, then fund the
+   vault.
+
+*New code* on the dashboard issues a fresh code, e.g. for a new machine. Without an open vault the agent's current
+API key stops working at once; with an open vault it keeps working until the new code is used. A new machine has a
+new signing key, so an open vault must be reclaimed and funded again for it.
+
+## Run the agent
+
+The agent side is a long-running local service (`src/service/`) that hosts one or more agents, each from its own
+profile `mcp-data/agents/<agentId>/` (directory 0700; `agent-config.json`, `agent-key.json`, later `tunnel-secret`,
+all 0600). MCP clients reach it over HTTP, so it keeps running between turns (Claude Code's desktop app stops stdio
+servers at the end of every turn).
+
+```bash
+npm run setup AT-XXXX-XXXX -- --proxy https://your-proxy.example
+```
+
+`setup` = connect (adds the profile, with a new key of its own) + run the service (on macOS a launchd agent of your
+user, `~/Library/LaunchAgents/de.agenttresor.agent.plist`, started at login and restarted if it stops; elsewhere a
+background process) + status + the fingerprint reminder. It then prints the `.mcp.json` for Claude Code and offers to
+write it if the project has none:
 
 ```json
-{
-  "mcpServers": {
-    "agenttresor": {
-      "command": "npm",
-      "args": ["--prefix", "/absolute/path/to/agenttresor", "run", "--silent", "mcp"],
-      "env": {
-        "PROXY_URL": "http://localhost:5050",
-        "AGENT_API_KEY": "agt_…",
-        "MERCHANT_URLS": "http://localhost:5080"
-      }
-    }
-  }
-}
+{ "mcpServers": { "agenttresor": { "type": "http", "url": "http://127.0.0.1:5070/agents/<agentId>/mcp" } } }
 ```
 
-**Claude Code**, stdio:
+`.mcp.json` names your own agent, so it is gitignored; `.mcp.json.example` is the template. Claude Code asks once to
+approve the `agenttresor` server. Instead of the file: `claude mcp add --transport http agenttresor <that url>`.
+
+| Command | |
+|---|---|
+| `npm run agents` | the profiles: agent id, proxy, key fingerprint |
+| `npm run agent:status` | is the service running; per agent: proxy reachable, vault balance, fingerprint, MCP URL |
+| `npm run agent:start` / `agent:stop` | background service (`mcp-data/agent.pid`, log in `mcp-data/agent.log`); a second instance is refused |
+| `npm run agent:install-service` / `agent:uninstall-service` | macOS launchd agent (your user account, never root) |
+| `npm run agent:run` | the service in the foreground, for debugging |
+
+A profile added with `npm run connect` while the service runs is served at once, and a new connection code for an
+agent is picked up without a restart. The single-agent files of earlier versions (`mcp-data/agent-config.json`,
+`mcp-data/agent-key.json`) are moved into their agent's profile on the first start.
+
+Each agent has its own MCP server, payer and key. Tools: `list_services`, `check_budget`, `get_price`,
+`pay_and_fetch {url, method?, body?, purpose, maxSats}`, `check_request {requestId}` and `show_agent_key` (the
+fingerprint the company checks before funding). For each payment the agent asks the merchant's price itself, refuses
+above `maxSats`, and signs the vault transaction only if output 0 pays exactly that price (`src/agent/pay.ts`). A
+payment above the approval threshold comes back `pending` with a request id; once the company approves it,
+`check_request` pays it. Without a connection, or with a revoked key, every tool answers what to do.
+
+Settings: `MCP_PORT` (5070), `MCP_DATA_DIR` (`mcp-data`), `MCP_HOST` (127.0.0.1) and `MCP_TOKEN`, in the
+environment or the project's `.env`. The service ignores `PROXY_URL`, `AGENT_API_KEY` and `MERCHANT_URLS`: each
+profile has its own.
+
+**Claude Desktop** and other clients that keep a stdio server running can still use `npm run --silent mcp`: it serves
+`AGENT_ID`'s profile, or the only one (here `PROXY_URL`, `AGENT_API_KEY` and `MERCHANT_URLS` still override it).
+
+### Plain HTTP API
+
+For agents that do not speak MCP, the service has the same tools as JSON, per agent, with the same access rules:
+
+| | |
+|---|---|
+| `GET /agents/<id>/v1/budget` | `check_budget` |
+| `POST /agents/<id>/v1/price` `{url, method?, body?}` | `get_price` |
+| `POST /agents/<id>/v1/pay` `{url, method?, body?, purpose, maxSats}` | `pay_and_fetch`: own price check, agent signature, never above `maxSats` |
+| `GET /agents/<id>/v1/requests/<requestId>` | `check_request`: pays an approved request |
+
+The answers are the tools' JSON results (`status`: `paid`, `free`, `pending`, `denied`, `paid_not_delivered`,
+`failed`), with HTTP 200; 400 for invalid input, 502 if the proxy cannot answer, 503 if the agent is not connected.
 
 ```bash
-claude mcp add agenttresor -e PROXY_URL=http://localhost:5050 -e AGENT_API_KEY=agt_… -e MERCHANT_URLS=http://localhost:5080 -- npm --prefix /absolute/path/to/agenttresor run --silent mcp
+curl -s -X POST http://127.0.0.1:5070/agents/A-1234ABCD/v1/pay -H 'content-type: application/json' \
+  -d '{"url":"https://shop.example/api/report","purpose":"Weekly market report","maxSats":600}'
 ```
 
-or over HTTP, with `npm run mcp:http` running and `MCP_TOKEN` set:
+```python
+import requests
+AGENT = "http://127.0.0.1:5070/agents/A-1234ABCD/v1"
+url = "https://shop.example/api/report"
+budget = requests.get(f"{AGENT}/budget").json()
+price = requests.post(f"{AGENT}/price", json={"url": url}).json()
+if price["status"] == "priced" and price["satoshis"] <= budget["remainingTodaySats"]:
+    r = requests.post(f"{AGENT}/pay", json={"url": url, "purpose": "Weekly market report", "maxSats": price["satoshis"]}).json()
+    print(r["status"], r.get("txid") or r.get("requestId") or r.get("reason"))
+else:
+    print("not paying:", price)
+```
+
+## Use it from ChatGPT
+
+ChatGPT cannot reach `127.0.0.1`, so this is an opt-in public tunnel (Cloudflare quick tunnel, no account needed):
 
 ```bash
-claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "Authorization: Bearer <MCP_TOKEN>"
+brew install cloudflared            # once
+npm run agent:tunnel A-1234ABCD     # with the service running
 ```
+
+It prints one URL, `https://<random>.trycloudflare.com/agents/A-1234ABCD/s/<secret>/mcp`. In ChatGPT, add a custom
+connector (Settings → Connectors, developer mode) with that URL as the MCP server URL and no authentication. The
+tunnel stays open while the command runs; the host name changes on every run, the secret does not (until revoked).
+`npm run agent:tunnel-revoke A-1234ABCD` rotates the secret: the old URL stops working at once.
+
+The same URL serves the HTTP API: `https://<random>.trycloudflare.com/agents/A-1234ABCD/s/<secret>/v1/budget`.
+
+### Security notes
+
+- **Loopback by default.** The service listens on 127.0.0.1. Local clients need no token, but a request with an
+  `Origin` header (a web page) is refused, and the MCP SDK's Host check stops DNS rebinding. Listening on another
+  address (`MCP_HOST`) requires `MCP_TOKEN` (at least 16 characters) on every request.
+- **The tunnel URL is a capability.** Anything that comes through a tunnel or proxy (`X-Forwarded-For`,
+  `Cf-Connecting-Ip`, `Forwarded`) or from a non-loopback address is accepted only with that agent's secret, in the
+  path or as `Authorization: Bearer <secret>`, compared in constant time. Another agent's secret, a wrong one or none
+  is a 401, and an agent that never had a tunnel cannot be reached from outside at all. The secret (32 random bytes)
+  is stored 0600 in the profile and printed only in that one URL, never logged; keep it like a password.
+- **The company's limits still apply.** Whoever holds the URL can only do what the agent can: the rules (allowed
+  hosts, max per payment, daily budget, approval threshold) are enforced by the proxy, a vault payment needs the
+  proxy's signature too, and the vault holds only what the company put in it. The company can reclaim the vault at any
+  time.
+- **Revoke** a leaked link with `npm run agent:tunnel-revoke <id>`, or stop the agent entirely with a new connection
+  code on the dashboard (its API key stops working).
+
+### Proxy settings for onboarding
+
+`PROXY_PUBLIC_URL` (e.g. `https://agentpay.example`) for the links in connection codes, and `TRUST_PROXY=1` behind
+a reverse proxy, so the rate limit on `POST /v1/connect` (10 attempts per IP per 10 minutes) sees real client IPs.
 
 ## Layout
 
@@ -147,9 +259,15 @@ claude mcp add --transport http agenttresor http://127.0.0.1:5070/mcp --header "
 - `src/company/vault-client.ts` — `fundVault`, `approveAndFund`, `reclaimVault` / `reclaimRequestVault` against any
   BRC-100 wallet; `vault-page.ts` is the
   browser script of `public/vault.html`, bundled by `npm run build:web` into `public/vault.js`
-- `src/agent/` — the agent side: `keys.ts` (its own key, `agent-key.json`), `proxy-client.ts`, `pay.ts` (price check,
-  sign, retry once), `vault-signer.ts` (checks a payment before signing it)
-- `src/mcp/` — the agent's MCP server: `server.ts` (tools), `http.ts` (Streamable HTTP + Bearer token), `main.ts`
+- `src/agent/` — the agent side: `connect.ts` (`npm run connect`), `profiles.ts` (one directory per agent, migration,
+  tunnel secret), `config.ts` (`agent-config.json`), `keys.ts` (its own key, `agent-key.json`), `tools.ts` (the tools,
+  shared by MCP and the HTTP API), `proxy-client.ts`, `pay.ts` (price check, sign, retry once), `vault-signer.ts`
+  (checks a payment before signing it)
+- `src/proxy/connect.ts` — one-time connection codes, constant-time lookup, rate limit, merchants from allowed hosts
+- `src/mcp/` — the agent's MCP server: `server.ts` (tools), `setup.ts` (settings, key, registration), `main.ts` (stdio)
+- `src/service/` — the local agent service: `app.ts` (MCP per agent), `api.ts` (plain HTTP API), `access.ts`
+  (loopback, Origin, tunnel secret), `registry.ts` (profiles), `control.ts` (pid lock, start/stop), `launchd.ts`,
+  `tunnel.ts` (cloudflared), `cli.ts` (`setup`, `agents`, `agent:*`), `main.ts`
 - `src/shared/merchant.ts` — unpaid BRC-121 preflight and merchant calls, used by the proxy and the agent
 - `src/audit/` — the hash-chained audit log, the OP_RETURN anchor script, anchor checks, `audit:verify`
 - `src/company/audit-client.ts` — `anchorAuditHead` against any BRC-100 wallet (`public/audit.js` in the browser)

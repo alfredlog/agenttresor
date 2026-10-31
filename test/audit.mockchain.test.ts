@@ -27,7 +27,7 @@ const entries = async (): Promise<AuditEntry[]> => await new AuditLog(h.db).all(
 const ofAgent = async (agentId: string): Promise<Array<[string, string]>> =>
   (await entries()).filter(e => e.data.agentId === agentId).map(e => [e.actor, e.type])
 const head = async (): Promise<{ seq: number, hash: string }> => (await h.admin('/admin/audit/head')).body
-const verify = async (): Promise<any> => (await h.admin('/admin/audit/verify')).body
+const verify = async (): Promise<any> => (await h.admin('/admin/audit/verify?full=1')).body
 const newAgent = async (name: string, vaultSats = 0): Promise<TestAgent> => {
   const a = await h.createAgent(name, rules(), vaultSats)
   agents.push(a)
@@ -74,16 +74,21 @@ describe('hash chain', () => {
     expect(() => { assertNoSecrets({ keyHint: 'agt_ab12…', agentPub: '02'.padEnd(66, 'a') }) }).not.toThrow()
   })
 
-  it('grows by one entry on each event', async () => {
+  it('grows on each event', async () => {
     const start = (await head()).seq
     const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'audit-bot', rules: rules() } })
-    expect((await head()).seq).toBe(start + 1)
+    expect((await head()).seq).toBe(start + 2) // created, and its connection code issued
+    const connected = await h.call('/v1/connect', undefined, { method: 'POST', body: { code: created.body.connectCode } })
+    expect((await head()).seq).toBe(start + 3)
     await h.admin(`/admin/agents/${created.body.id}/rules`, { method: 'PUT', body: { ...rules(), dailyBudgetSats: 9_000 } })
-    expect((await head()).seq).toBe(start + 2)
-    const last = (await h.admin('/admin/audit?limit=2')).body.entries
-    expect(last.map((e: any) => [e.actor, e.type])).toEqual([['admin', 'agent.created'], ['admin', 'agent.rules_changed']])
-    expect(last[0].data).toMatchObject({ agentId: created.body.id, keyHint: `${created.body.apiKey.slice(0, 8)}…` })
-    expect(last[1].data).toMatchObject({ before: { dailyBudgetSats: 50_000 }, after: { dailyBudgetSats: 9_000 } })
+    expect((await head()).seq).toBe(start + 4)
+    const last = (await h.admin('/admin/audit?limit=4')).body.entries
+    expect(last.map((e: any) => [e.actor, e.type])).toEqual([
+      ['admin', 'agent.created'], ['admin', 'agent.connect_code_issued'], [`agent:${created.body.id}`, 'agent.connected'], ['admin', 'agent.rules_changed']
+    ])
+    expect(last[1].data).toMatchObject({ agentId: created.body.id, oldKeyRevoked: true })
+    expect(last[2].data).toEqual({ agentId: created.body.id, keyHint: `${connected.body.apiKey.slice(0, 8)}…` })
+    expect(last[3].data).toMatchObject({ before: { dailyBudgetSats: 50_000 }, after: { dailyBudgetSats: 9_000 } })
     expect((await verify()).ok).toBe(true)
   })
 })
@@ -95,6 +100,8 @@ describe('what a payment leaves in the log', () => {
     const actor = `agent:${agent.id}`
     expect(await ofAgent(agent.id)).toEqual([
       ['admin', 'agent.created'],
+      ['admin', 'agent.connect_code_issued'],
+      [actor, 'agent.connected'],
       [actor, 'agent.key_registered'],
       ['company', 'vault.funded'],
       [actor, 'request.created'],
@@ -121,7 +128,7 @@ describe('what a payment leaves in the log', () => {
     await h.admin(`/admin/requests/${denied}/deny`, { method: 'POST', body: { reason: 'one is enough' } })
 
     const actor = `agent:${agent.id}`
-    expect((await ofAgent(agent.id)).slice(3)).toEqual([
+    expect((await ofAgent(agent.id)).slice(5)).toEqual([
       [actor, 'request.created'],
       ['company', 'request_vault.funded'],
       ['company', 'request.decided'],
@@ -144,7 +151,7 @@ describe('what a payment leaves in the log', () => {
     const id = (await h.pay(agent, { url: `${merchant}/api/hotel/book`, method: 'POST', body: { roomType: 'suite', nights: 1 }, purpose: 'Suite' })).body.requestId
     h.clock.offset = 8 * 86_400_000
     try { await h.admin('/admin/requests') } finally { h.clock.offset = 0 }
-    const log = (await entries()).filter(e => e.data.agentId === agent.id).slice(3).map(e => [e.actor, e.type, e.data.decision ?? e.data.was ?? ''])
+    const log = (await entries()).filter(e => e.data.agentId === agent.id).slice(5).map(e => [e.actor, e.type, e.data.decision ?? e.data.was ?? ''])
     expect(log).toEqual([
       [`agent:${agent.id}`, 'request.created', ''],
       ['rules', 'request.decided', 'denied'],

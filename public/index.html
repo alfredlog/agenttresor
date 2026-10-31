@@ -41,14 +41,24 @@
     .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
     .rules { font-size: 12px; line-height: 1.6; }
     .fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; letter-spacing: .02em; }
-    #key-box { border-color: var(--warn); }
-    #key-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    #code-box { border-color: var(--ok); }
+    #code-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .code-big { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; font-weight: 700; letter-spacing: .08em; margin: 10px 0 4px; }
+    .expired { color: var(--bad); font-weight: 600; }
     .warn { color: var(--warn); font-weight: 600; }
     .hint { font-size: 13px; }
     .chain-ok { color: var(--ok); font-weight: 600; }
     .chain-bad { color: var(--bad); font-weight: 600; }
     td.details { font-size: 12px; max-width: 420px; word-break: break-word; }
     #audit-msg.failed { color: var(--bad); }
+    .unanchored { color: var(--warn); font-weight: 600; }
+    #audit-alert { border: 1px solid var(--bad); color: var(--bad); background: var(--card); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-weight: 600; }
+    .agent-disabled { color: var(--warn); font-weight: 600; }
+    .agent-deleted { color: var(--muted); font-weight: 600; }
+    tr.deleted td { opacity: .6; }
+    .toggle { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; margin-left: 12px; }
+    .toggle input { width: auto; }
+    td.agent-actions button { margin: 0 4px 4px 0; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -63,22 +73,25 @@
     <span id="error"></span>
   </div>
 
-  <h2>Agents</h2>
+  <h2>Agents <label class="toggle"><input id="show-deleted" type="checkbox"> show deleted</label></h2>
   <div class="table"><table>
-    <thead><tr><th>Agent</th><th>API key</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
+    <thead><tr><th>Agent</th><th>Connection</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
     <tbody id="agents"><tr><td colspan="6" class="muted">Enter the admin token.</td></tr></tbody>
   </table></div>
 
-  <!-- The new API key is shown here once, never stored, and removed from the page on Close. -->
-  <div id="key-box" class="card" hidden>
-    <div><strong>API key for <span id="key-agent"></span></strong></div>
+  <!-- The one-time connection code is shown here, never stored, and removed from the page on Close. -->
+  <div id="code-box" class="card" hidden>
+    <div><strong>Connection code for <span id="code-agent"></span></strong></div>
+    <div id="code-value" class="code-big"></div>
+    <div id="code-countdown" class="muted"></div>
     <div class="actions">
-      <input id="key-value" readonly aria-label="New agent API key">
-      <button id="key-copy" class="primary">Copy</button>
-      <button id="key-close">Close</button>
+      <input id="code-command" readonly aria-label="Command to connect the agent">
+      <button id="code-copy" class="primary">Copy</button>
+      <button id="code-close">Close</button>
     </div>
-    <p class="warn">Copy it now into the agent's .env (AGENT_API_KEY). It will never be shown again.</p>
-    <p class="hint muted">Next step: on the agent's own machine, run <code>npm run mcp</code>. It creates the agent's signing key, registers it with the proxy and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same.</p>
+    <p class="hint muted">Next step: on the agent's own machine, in the agent's project folder, run this command. It saves the agent's
+      settings, creates its signing key and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on
+      <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same. The code works once.</p>
   </div>
 
   <div id="rules-box" class="card" hidden>
@@ -125,9 +138,12 @@
   <h2>Audit log</h2>
   <div class="muted hint">Every decision and payment, hash-chained: changing any past entry breaks the chain. Anchoring writes the
     current head hash on BSV from your wallet, so even a rewritten chain is caught.</div>
+  <div id="audit-alert" hidden></div>
   <div class="actions">
     <span id="audit-status" class="muted">Enter the admin token.</span>
+    <span id="audit-unanchored" class="unanchored"></span>
     <button id="anchor" class="primary" disabled>Anchor now with BSV Desktop</button>
+    <button id="verify-full">Verify full chain</button>
     <span id="audit-msg" class="muted"></span>
   </div>
   <div class="table" style="margin-top:12px"><table>
@@ -155,6 +171,7 @@
   const time = v => v ? new Date(v).toLocaleString() : ''
   const fpOf = pub => { if (!pub) return ''; try { return fingerprint(pub) } catch { return '?' } }
   const VAULT_STATUS = { no_key: 'agent key not registered', awaiting_funding: 'awaiting funding', open: 'open', closed: 'closed' }
+  const AGENT_STATUS = { disabled: '<span class="agent-disabled">disabled</span>', deleted: '<span class="agent-deleted">deleted</span>' }
 
   async function api (path, init = {}) {
     const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${store.get()}`, ...(init.headers || {}) } })
@@ -182,16 +199,30 @@
   const details = data => Object.entries(data ?? {})
     .map(([k, v]) => `${k}=${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`).join(' · ').slice(0, 220)
 
-  function renderAudit ({ entries, anchors }, check) {
-    const lastAnchor = anchors.at(-1)
+  /** Chain status line. The periodic refresh verifies incrementally; "Verify full chain" re-checks everything. */
+  function renderCheck (check) {
+    const lastAnchor = check.anchors.at(-1)
+    const scope = check.mode === 'full' ? 'full check' : `checked through #${check.verifiedThrough}`
     $('audit-status').className = check.ok ? 'chain-ok' : 'chain-bad'
     $('audit-status').textContent = check.ok
-      ? `Chain valid · ${check.entries} entries${lastAnchor ? ` · last anchored at #${lastAnchor.seq}` : ' · not anchored yet'}`
+      ? `Chain valid (${scope}) · ${check.entries} entries${lastAnchor ? ` · last anchored at #${lastAnchor.seq}` : ' · not anchored yet'}`
       : `Chain BROKEN at #${check.brokenAt}: ${check.reason}`
     if (check.ok && check.anchors.some(a => !a.matches)) {
       $('audit-status').className = 'chain-bad'
       $('audit-status').textContent = `Chain rewritten: anchor #${check.anchors.find(a => !a.matches).seq} no longer matches the log`
     }
+  }
+
+  function renderAudit ({ entries, anchors }, check, head) {
+    renderCheck(check)
+    // A log shorter than an anchor means its newest entries were deleted: nothing else can explain it.
+    $('audit-alert').hidden = !head.chainShorterThanAnchor
+    $('audit-alert').textContent = head.chainShorterThanAnchor
+      ? `Alert: the log ends at #${head.seq}, but an anchor on BSV covers #${head.latestAnchorSeq}. Its newest entries were deleted.`
+      : ''
+    $('audit-unanchored').textContent = head.unanchoredEntries > 0
+      ? `${head.unanchoredEntries} ${head.unanchoredEntries === 1 ? 'entry' : 'entries'} not anchored yet`
+      : ''
     // Stays disabled while an anchor is in progress, whatever the periodic refresh finds.
     $('anchor').disabled = anchoring || check.entries === 0
     $('audit').innerHTML = entries.length === 0
@@ -208,28 +239,41 @@
           <td class="${matches.get(a.txid) ? 'chain-ok' : 'chain-bad'}">${matches.get(a.txid) ? 'yes' : 'NO'}</td></tr>`).join('')
   }
 
+  /** The buttons an agent's row offers, by its status. A deleted agent has none: it is only kept for its history. */
+  function agentActions (a) {
+    const id = esc(a.id)
+    if (a.status === 'deleted') return ''
+    const del = `<button class="deny" data-agent-action="delete" data-id="${id}">Delete</button>`
+    if (a.status === 'disabled') {
+      return `<button data-edit="${id}">Edit rules</button><button class="approve" data-agent-action="enable" data-id="${id}">Enable</button>${del}`
+    }
+    return `<button data-edit="${id}">Edit rules</button><button data-code="${id}">New code</button>` +
+      `<button class="deny" data-agent-action="disable" data-id="${id}">Disable</button>${del}`
+  }
+
   function renderAgents () {
     $('agents').innerHTML = agents.length === 0
       ? '<tr><td colspan="6" class="muted">No agents yet: create one below.</td></tr>'
-      : agents.map(a => `<tr>
-          <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span></td>
-          <td class="mono">${esc(a.key)}</td>
+      : agents.map(a => `<tr class="${a.status === 'deleted' ? 'deleted' : ''}">
+          <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span>${AGENT_STATUS[a.status] ? `<br>${AGENT_STATUS[a.status]}` : ''}</td>
+          <td>${a.status !== 'active' ? '<span class="muted">key revoked</span>' : a.connected ? `<span class="mono">${esc(a.key)}</span>` : '<span class="muted">not connected</span>'}</td>
           <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
           <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
             max ${esc(a.rules.maxPerPaymentSats)} · daily ${esc(a.rules.dailyBudgetSats)} · approval above ${esc(a.rules.approvalThresholdSats)} sats</td>
           <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}</td>
-          <td><button data-edit="${esc(a.id)}">Edit rules</button></td></tr>`).join('')
+          <td class="agent-actions">${agentActions(a)}</td></tr>`).join('')
   }
 
   async function refresh () {
     if (!store.get()) return
     try {
-      const [{ agents: list }, { requests }, ledger, audit, check] = await Promise.all([
-        api('/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'), api('/admin/audit/verify')
+      const [{ agents: list }, { requests }, ledger, audit, check, head] = await Promise.all([
+        api($('show-deleted').checked ? '/admin/agents?deleted=1' : '/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'),
+        api('/admin/audit/verify'), api('/admin/audit/head')
       ])
       agents = list
       renderAgents()
-      renderAudit(audit, check)
+      renderAudit(audit, check, head)
       $('error').textContent = ''
       $('pending').innerHTML = requests.length === 0
         ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
@@ -251,11 +295,43 @@
     }
   }
 
-  // ── New agent: the key is shown once, then removed from the page ────────
-  function closeKeyBox () {
-    $('key-value').value = ''
-    $('key-agent').textContent = ''
-    $('key-box').hidden = true
+  // ── Connection codes: shown with a countdown, never stored, removed on Close ──
+  let codeTimer = null
+
+  function closeCodeBox () {
+    clearInterval(codeTimer)
+    $('code-value').textContent = ''
+    $('code-command').value = ''
+    $('code-agent').textContent = ''
+    $('code-countdown').textContent = ''
+    $('code-box').hidden = true
+  }
+
+  function showCode (agentLabel, issued) {
+    clearInterval(codeTimer)
+    const proxy = new URL(issued.connectUrl).origin
+    $('code-agent').textContent = agentLabel
+    $('code-value').textContent = issued.connectCode
+    // `--` hands --proxy to the script; without it npm would take --proxy as its own setting.
+    $('code-command').value = `npm run connect ${issued.connectCode} -- --proxy ${proxy}`
+    $('code-copy').disabled = false
+    $('code-box').hidden = false
+    const expires = Date.parse(issued.expiresAt)
+    const tick = () => {
+      const left = Math.max(0, Math.round((expires - Date.now()) / 1000))
+      if (left === 0) {
+        clearInterval(codeTimer)
+        $('code-countdown').className = 'expired'
+        $('code-countdown').textContent = 'Expired: use "New code" in the agents list.'
+        $('code-copy').disabled = true
+        return
+      }
+      $('code-countdown').className = 'muted'
+      $('code-countdown').textContent = `Valid for ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}, once.`
+    }
+    tick()
+    codeTimer = setInterval(tick, 1000)
+    $('code-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
 
   $('create').addEventListener('click', async ev => {
@@ -266,10 +342,7 @@
     btn.disabled = true
     try {
       const created = await api('/admin/agents', { method: 'POST', body: JSON.stringify({ name, rules: rulesFrom(form) }) })
-      $('key-agent').textContent = `${created.name} (${created.id})`
-      $('key-value').value = created.apiKey
-      $('key-box').hidden = false
-      $('key-value').select()
+      showCode(`${created.name} (${created.id})`, created)
       form.reset()
     } catch (err) {
       $('error').textContent = err.message
@@ -279,22 +352,73 @@
     await refresh()
   })
 
-  $('key-copy').addEventListener('click', async () => {
-    const input = $('key-value')
+  $('code-copy').addEventListener('click', async () => {
+    const input = $('code-command')
     try {
       await navigator.clipboard.writeText(input.value)
-      $('key-copy').textContent = 'Copied'
+      $('code-copy').textContent = 'Copied'
     } catch {
-      input.select() // no clipboard access (e.g. plain http): the key is selected for Ctrl/Cmd+C
+      input.select() // no clipboard access (e.g. plain http): the command is selected for Ctrl/Cmd+C
     }
-    setTimeout(() => { $('key-copy').textContent = 'Copy' }, 1500)
+    setTimeout(() => { $('code-copy').textContent = 'Copy' }, 1500)
   })
-  $('key-close').addEventListener('click', closeKeyBox)
+  $('code-close').addEventListener('click', closeCodeBox)
 
   // ── Edit rules ──────────────────────────────────────────────────────────
   let editing = null
 
-  $('agents').addEventListener('click', ev => {
+  $('agents').addEventListener('click', async ev => {
+    // Disable / Enable / Delete. Nothing is erased: requests, ledger and audit entries stay.
+    const actBtn = ev.target.closest('button[data-agent-action]')
+    if (actBtn) {
+      const { agentAction: action, id } = actBtn.dataset
+      const agent = agents.find(a => a.id === id)
+      if (!agent) return
+      const label = `${agent.name} (${agent.id})`
+      const question = {
+        disable: `Disable ${label}?\n\nIts API key and connection codes are revoked, its pending and approved requests are denied, ` +
+          'and it cannot pay until you enable it again (with a new connection code).\n\nIts history is kept: requests, ledger and audit log.',
+        delete: `Delete ${label}?\n\nIt disappears from the list and can never be used again. Its vault must be reclaimed first.\n\n` +
+          'Its history is kept: requests, ledger entries and audit log entries are never erased.'
+      }[action]
+      if (question !== undefined && !confirm(question)) return
+      actBtn.disabled = true
+      let failure = ''
+      try {
+        const path = `/admin/agents/${encodeURIComponent(agent.id)}`
+        if (action === 'delete') await api(path, { method: 'DELETE' })
+        else {
+          const r = await api(`${path}/${action}`, { method: 'POST' })
+          if (action === 'enable') showCode(label, r)
+        }
+      } catch (err) {
+        failure = `${action[0].toUpperCase()}${action.slice(1)} ${agent.name}: ${err.message}`
+      } finally {
+        actBtn.disabled = false
+      }
+      await refresh()
+      // After the refresh, which clears the error line when it succeeds (e.g. "reclaim its vault first").
+      if (failure !== '') $('error').textContent = failure
+      return
+    }
+    const codeBtn = ev.target.closest('button[data-code]')
+    if (codeBtn) {
+      const agent = agents.find(a => a.id === codeBtn.dataset.code)
+      if (!agent) return
+      // Without an open vault, a new code revokes the agent's current API key at once.
+      if (agent.connected && agent.vault.status !== 'open' &&
+        !confirm(`New code for ${agent.name}? Its current API key stops working now; the agent must connect again with the new code.`)) return
+      codeBtn.disabled = true
+      try {
+        showCode(`${agent.name} (${agent.id})`, await api(`/admin/agents/${encodeURIComponent(agent.id)}/connect-code`, { method: 'POST' }))
+      } catch (err) {
+        $('error').textContent = err.message
+      } finally {
+        codeBtn.disabled = false
+      }
+      await refresh()
+      return
+    }
     const btn = ev.target.closest('button[data-edit]')
     if (!btn) return
     const agent = agents.find(a => a.id === btn.dataset.edit)
@@ -366,6 +490,25 @@
     await refresh()
   })
 
+  $('verify-full').addEventListener('click', async ev => {
+    const btn = ev.currentTarget // currentTarget is null once the handler awaits
+    btn.disabled = true
+    $('audit-msg').className = 'muted'
+    $('audit-msg').textContent = 'Re-checking every entry…'
+    try {
+      const check = await api('/admin/audit/verify?full=1')
+      renderCheck(check)
+      $('audit-msg').className = check.ok && check.anchors.every(a => a.matches) ? 'muted' : 'failed'
+      $('audit-msg').textContent = `Full check: ${check.checked} entries re-hashed, ${check.ok ? 'chain valid' : `broken at #${check.brokenAt}`}.`
+    } catch (err) {
+      $('audit-msg').className = 'failed'
+      $('audit-msg').textContent = `Full check failed: ${err.message}`
+    } finally {
+      btn.disabled = false
+    }
+  })
+
+  $('show-deleted').addEventListener('change', () => { refresh() })
   $('save').addEventListener('click', () => { store.set($('token').value.trim()); $('token').value = ''; refresh() })
   $('token').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('save').click() })
   refresh()

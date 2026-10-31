@@ -10,3 +10,5 @@ mcp-data/
 public/vault.js
 public/fingerprint.js
 public/audit.js
+# Per user: names your own agent (npm run setup prints it); see .mcp.json.example
+.mcp.json

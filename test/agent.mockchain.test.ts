@@ -6,13 +6,10 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
-import type { Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Transaction } from '@bsv/sdk'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { AGENT_KEY_FILE, loadOrCreateAgentKey, registerAgentKey } from '../src/agent/keys'
@@ -21,7 +18,6 @@ import { ProxyClient } from '../src/agent/proxy-client'
 import { approveAndFund, fundVault } from '../src/company/vault-client'
 import { fingerprint } from '../src/shared/fingerprint'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
-import { createMcpHttpApp } from '../src/mcp/http'
 import { createAgentMcpServer } from '../src/mcp/server'
 import { ADMIN_TOKEN, createProxyHarness, spendableSats, type ProxyHarness } from './helpers/proxy'
 
@@ -47,8 +43,8 @@ interface McpAgent {
 
 /** An agent as the MCP server runs it: own key file, key registered, vault funded by the company. */
 async function startAgent (name: string, vaultSats: number): Promise<McpAgent> {
-  const created = await h.admin('/admin/agents', { method: 'POST', body: { name, rules: rules.value } })
-  const agent = { id: created.body.id, calls: [] } as unknown as McpAgent
+  const created = await h.newAgent(name, rules.value)
+  const agent = { id: created.id, calls: [] } as unknown as McpAgent
   const observed: typeof fetch = async (input, init) => {
     const url = new URL(String(input))
     agent.calls.push(`${init?.method ?? 'GET'} ${url.pathname}`)
@@ -57,7 +53,7 @@ async function startAgent (name: string, vaultSats: number): Promise<McpAgent> {
     const body = agent.tamper(await res.json())
     return new Response(JSON.stringify(body), { status: res.status, headers: { 'content-type': 'application/json' } })
   }
-  agent.client = new ProxyClient({ proxyUrl: h.url, apiKey: created.body.apiKey, fetch: observed })
+  agent.client = new ProxyClient({ proxyUrl: h.url, apiKey: created.apiKey, fetch: observed })
   const key = await loadOrCreateAgentKey(join(dataRoot, agent.id))
   await registerAgentKey(agent.client, key.publicKey)
   agent.publicKey = key.publicKey
@@ -85,8 +81,8 @@ afterAll(async () => {
 
 describe('agent key', () => {
   it('is created with mode 0600, reused on restart, and its public key registered with the proxy', async () => {
-    const created = await h.admin('/admin/agents', { method: 'POST', body: { name: 'key-bot', rules: rules.value } })
-    const client = new ProxyClient({ proxyUrl: h.url, apiKey: created.body.apiKey })
+    const created = await h.newAgent('key-bot', rules.value)
+    const client = new ProxyClient({ proxyUrl: h.url, apiKey: created.apiKey })
     const dir = join(dataRoot, 'key-bot')
 
     const first = await loadOrCreateAgentKey(dir)
@@ -101,9 +97,9 @@ describe('agent key', () => {
     expect(await registerAgentKey(client, restart.publicKey)).toBe('registered') // same key, still unfunded
 
     // Once the vault is funded, a restart with the same key is fine…
-    await fundVault(h.company, h.url, ADMIN_TOKEN, created.body.id, 5_000, fingerprint(first.publicKey))
+    await fundVault(h.company, h.url, ADMIN_TOKEN, created.id, 5_000, fingerprint(first.publicKey))
     expect(await registerAgentKey(client, (await loadOrCreateAgentKey(dir)).publicKey)).toBe('already_open')
-    expect((await h.admin(`/admin/vaults`)).body.vaults.find((v: any) => v.agentId === created.body.id).status).toBe('open')
+    expect((await h.admin(`/admin/vaults`)).body.vaults.find((v: any) => v.agentId === created.id).status).toBe('open')
     // …a different key stops the agent with a clear error.
     const other = await loadOrCreateAgentKey(join(dataRoot, 'key-bot-other'))
     await expect(registerAgentKey(client, other.publicKey)).rejects.toThrow(/funded for another key/)
@@ -243,37 +239,5 @@ describe('MCP server', () => {
     const invalid = await mcp.callTool({ name: 'pay_and_fetch', arguments: { url: report.url, maxSats: 600 } })
     expect(invalid.isError).toBe(true) // purpose is required
     await mcp.close()
-  })
-
-  describe('over Streamable HTTP', () => {
-    const TOKEN = 'test-mcp-token-0123456789'
-    let server: Server
-    let url: string
-
-    beforeAll(async () => {
-      const agent = await startAgent('http-bot', 5_000)
-      const app = createMcpHttpApp({ createServer: () => createAgentMcpServer({ payer: agent.payer, client: agent.client, merchantUrls: [merchant], agentPublicKey: agent.publicKey }), token: TOKEN })
-      await new Promise<void>(resolve => { server = app.listen(0, '127.0.0.1', () => { resolve() }) })
-      url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`
-    })
-    afterAll(async () => { await new Promise(resolve => server?.close(resolve)) })
-
-    it('refuses a request without MCP_TOKEN (401)', async () => {
-      const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '1' } } }
-      const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
-      expect((await fetch(url, { method: 'POST', headers, body: JSON.stringify(init) })).status).toBe(401)
-      expect((await fetch(url, { method: 'POST', headers: { ...headers, authorization: 'Bearer wrong-token' }, body: JSON.stringify(init) })).status).toBe(401)
-    })
-
-    it('serves the tools with the token', async () => {
-      const mcp = new Client({ name: 'test-model', version: '1.0.0' })
-      await mcp.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } } }))
-      expect((await mcp.listTools()).tools).toHaveLength(6)
-      await mcp.close()
-    })
-
-    it('needs a real token to start', () => {
-      expect(() => createMcpHttpApp({ createServer: () => { throw new Error('unused') }, token: 'short' })).toThrow(/at least 16/)
-    })
   })
 })

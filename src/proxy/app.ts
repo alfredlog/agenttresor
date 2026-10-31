@@ -1,7 +1,8 @@
 /**
  * Spend-control proxy HTTP API.
  *   Agents (Authorization: Bearer agt_…): /v1/pay, /v1/requests/:id, /v1/requests/:id/execute,
- *     /v1/requests/:id/sign, /v1/budget, /v1/vault/agent-key
+ *     /v1/requests/:id/sign, /v1/budget, /v1/services, /v1/vault/agent-key
+ *   Onboarding (no auth, one-time code, rate-limited): POST /v1/connect; page /connect#AT-…
  *   Admin  (Authorization: Bearer ADMIN_TOKEN): /admin/… (agents, rules, approvals, ledger, vaults, audit log)
  *   Dashboard: / (public/index.html); vault funding page: /vault.html
  * Keys and tokens are never logged.
@@ -21,6 +22,7 @@ import { AuditLog } from '../audit/log.js'
 import { recordAnchor } from '../audit/anchors.js'
 import type { Notifier } from './notifier.js'
 import { DEFAULT_RULES, parseRules } from './rules.js'
+import { CONNECT_CODE_TTL_MS, findConnectCode, generateConnectCode, hashConnectCode, merchantsFor, normalizeConnectCode, RateLimiter } from './connect.js'
 import { ProxyError, SpendControl, type Outcome } from './service.js'
 import { ProxyStore, REQUEST_STATUSES, SPENT_STATUSES, type Agent, type PaymentRequestRecord, type RequestStatus } from './store.js'
 
@@ -36,6 +38,12 @@ export interface ProxyAppOptions {
   adminToken: string
   now?: () => number
   network?: BsvNetwork
+  /** The proxy's public URL (PROXY_PUBLIC_URL), for connection links; default: the request's own origin. */
+  publicUrl?: string
+  /** Behind a reverse proxy (TRUST_PROXY=1): take the client IP from X-Forwarded-For, for the rate limit. */
+  trustProxy?: boolean
+  /** Attempts at POST /v1/connect per IP (default 10 per 10 minutes). */
+  connectRateLimit?: { max: number, windowMs: number }
 }
 
 const PUBLIC_DIR = fileURLToPath(new URL('../../public', import.meta.url))
@@ -102,8 +110,9 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const now = opts.now ?? Date.now
   const store = new ProxyStore(opts.db)
   const audit = new AuditLog(opts.db, now)
+  const vaultStore = new VaultStore(opts.db)
   const vault = new VaultService({
-    store: new VaultStore(opts.db),
+    store: vaultStore,
     policy: new PolicyKeys(opts.policyRootKey),
     chainTracker: opts.chainTracker,
     broadcaster: opts.broadcaster,
@@ -112,8 +121,11 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   })
   const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now })
 
+  const connectLimiter = new RateLimiter(opts.connectRateLimit?.max ?? 10, opts.connectRateLimit?.windowMs ?? 10 * 60_000, now)
+
   const app = express()
   app.disable('x-powered-by')
+  if (opts.trustProxy === true) app.set('trust proxy', 1)
   app.use(express.static(PUBLIC_DIR))
   // Funding BEEFs carry the transaction's unconfirmed ancestry, so allow more than a plain request needs.
   app.use(express.json({ limit: '2mb' }))
@@ -121,12 +133,34 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
     (req: Request, res: Response, next: NextFunction) => { fn(req, res).catch(next) }
 
+  const publicUrl = (req: Request): string => opts.publicUrl?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host') ?? 'localhost'}`
+
+  /**
+   * Issues a one-time connection code for an agent (inside the caller's
+   * transaction). Without an open vault the old API key is revoked at once;
+   * with one it keeps working until the code is used, so a running agent
+   * is not cut off before its replacement connects.
+   */
+  const issueConnectCode = async (trx: Knex.Transaction, agentId: string, req: Request): Promise<{ connectCode: string, connectUrl: string, expiresAt: string, oldKeyRevoked: boolean }> => {
+    const s = store.with(trx)
+    // Read through the transaction: the database has a single connection.
+    const vaultOpen = (await vaultStore.with(trx).getVault(agentId))?.status === 'open'
+    if (!vaultOpen) await s.replaceAgentKey(agentId, hashAgentKey(generateAgentKey()), '')
+    const code = generateConnectCode()
+    const expiresAt = now() + CONNECT_CODE_TTL_MS
+    await s.insertConnectCode(agentId, hashConnectCode(code), expiresAt, now())
+    await audit.with(trx).append('admin', 'agent.connect_code_issued', { agentId, expiresAt: iso(expiresAt), oldKeyRevoked: !vaultOpen })
+    return { connectCode: code, connectUrl: `${publicUrl(req)}/connect#${code}`, expiresAt: iso(expiresAt)!, oldKeyRevoked: !vaultOpen }
+  }
+
   const requireAgent = (req: Request, res: Response, next: NextFunction): void => {
     const unauthorized = (): void => { res.status(401).json({ error: 'missing or invalid agent key' }) }
     const key = bearer(req)
     if (key === undefined || !isAgentKey(key)) { unauthorized(); return }
     store.findAgentByKeyHash(hashAgentKey(key)).then(agent => {
       if (agent === undefined) { unauthorized(); return }
+      // Disabling revokes the key already; this also holds if a key ever outlived its agent.
+      if (agent.status !== 'active') { res.status(401).json({ error: 'agent disabled' }); return }
       res.locals.agent = agent
       next()
     }, next)
@@ -169,6 +203,37 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     res.json(await control.budget(agentOf(res)))
   }))
 
+  // The merchants this agent may pay (from its allowed hosts), so the agent needs no merchant list of its own.
+  app.get('/v1/services', requireAgent, wrap(async (_req, res) => {
+    res.json({ merchants: merchantsFor((await store.getRules(agentOf(res).id)).allowedHosts) })
+  }))
+
+  // ── Onboarding: exchange a one-time connection code for the agent's API key ──
+  app.get('/connect', (_req, res) => { res.sendFile('connect.html', { root: PUBLIC_DIR }) })
+
+  app.post('/v1/connect', wrap(async (req, res) => {
+    const refused = (): void => { res.status(401).json({ error: 'invalid, expired or already used connection code' }) }
+    if (!connectLimiter.hit(req.ip ?? 'unknown')) { res.status(429).json({ error: 'too many attempts; try again later' }); return }
+    const code = normalizeConnectCode((req.body ?? {}).code)
+    if (code === undefined) { refused(); return }
+    const t = now()
+    const result = await store.transaction(async trx => {
+      const s = store.with(trx)
+      // Every active code is compared in constant time: a wrong, expired or used code costs the same as a right one.
+      const match = findConnectCode(await s.activeConnectCodes(t), hashConnectCode(code))
+      if (match === undefined || (await s.getAgent(match.agentId))?.status !== 'active') return undefined
+      if (!await s.useConnectCode(match.codeHash, t)) return undefined
+      // The API key is minted now; before this, no one has ever seen a working key for this agent.
+      const apiKey = generateAgentKey()
+      await s.replaceAgentKey(match.agentId, hashAgentKey(apiKey), agentKeyHint(apiKey))
+      await audit.with(trx).append(`agent:${match.agentId}`, 'agent.connected', { agentId: match.agentId, keyHint: maskAgentKey(agentKeyHint(apiKey)) })
+      return { agentId: match.agentId, apiKey, rules: await s.getRules(match.agentId) }
+    })
+    if (result === undefined) { refused(); return }
+    // The only response that ever carries the agent's API key.
+    res.json({ agentId: result.agentId, apiKey: result.apiKey, proxyUrl: publicUrl(req), merchants: merchantsFor(result.rules.allowedHosts) })
+  }))
+
   // The agent generates its own key pair and registers only the public key.
   app.post('/v1/vault/agent-key', requireAgent, wrap(async (req, res) => {
     const { publicKey } = (req.body ?? {}) as Record<string, unknown>
@@ -185,19 +250,62 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     if (typeof name !== 'string' || name.trim() === '' || name.length > 100) { res.status(400).json({ error: 'name is required (max 100 characters)' }); return }
     const rules = rulesInput === undefined ? DEFAULT_RULES : parseRules(rulesInput)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
-    const apiKey = generateAgentKey()
-    const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: agentKeyHint(apiKey), createdAt: now() }
-    await store.createAgent(agent, hashAgentKey(apiKey), rules)
-    // The key itself is never logged, only its masked hint.
-    await audit.append('admin', 'agent.created', { agentId: agent.id, name: agent.name, keyHint: maskAgentKey(agent.keyHint), rules })
-    // The only time the key is ever returned.
-    res.status(201).json({ id: agent.id, name: agent.name, apiKey, key: maskAgentKey(agent.keyHint), rules })
+    // The agent starts with a key no one ever sees; its real key is minted when it connects with the code.
+    const agent: Agent = { id: `A-${randomBytes(4).toString('hex').toUpperCase()}`, name: name.trim(), keyHint: '', createdAt: now(), status: 'active' }
+    const code = await store.transaction(async trx => {
+      await store.with(trx).createAgent(agent, hashAgentKey(generateAgentKey()), rules)
+      await audit.with(trx).append('admin', 'agent.created', { agentId: agent.id, name: agent.name, rules })
+      return await issueConnectCode(trx, agent.id, req)
+    })
+    res.status(201).json({ id: agent.id, name: agent.name, rules, connectCode: code.connectCode, connectUrl: code.connectUrl, expiresAt: code.expiresAt })
+  }))
+
+  /** The agent, unless unknown or deleted (a deleted agent is only kept for its history). */
+  const liveAgent = async (id: string): Promise<Agent> => {
+    const agent = await store.getAgent(id)
+    if (agent === undefined || agent.status === 'deleted') throw new ProxyError(404, 'agent not found')
+    return agent
+  }
+
+  // A new one-time code, e.g. for an agent on a new machine or one whose code expired.
+  admin.post('/agents/:id/connect-code', wrap(async (req, res) => {
+    const agent = await liveAgent(String(req.params.id))
+    if (agent.status === 'disabled') { res.status(409).json({ error: 'agent is disabled; enable it to issue a new code' }); return }
+    const code = await store.transaction(async trx => await issueConnectCode(trx, agent.id, req))
+    res.status(201).json({ id: agent.id, ...code })
   }))
 
   // Never the API key or its hash: only the masked hint. agentPub is the agent's public signing key
   // (the dashboard shows its fingerprint).
-  admin.get('/agents', wrap(async (_req, res) => {
-    const agents = await store.listAgents()
+  // Disable: the key and codes are revoked, open requests denied, new requests refused. Reversible with enable.
+  admin.post('/agents/:id/disable', wrap(async (req, res) => {
+    const r = await control.retireAgent(String(req.params.id), 'disabled')
+    res.json({ id: r.agent.id, status: r.agent.status, deniedRequests: r.deniedRequests })
+  }))
+
+  // Enable: the agent connects again with a new one-time code (its old key stays revoked).
+  admin.post('/agents/:id/enable', wrap(async (req, res) => {
+    const agent = await liveAgent(String(req.params.id))
+    if (agent.status !== 'disabled') { res.status(409).json({ error: `agent is ${agent.status}, not disabled` }); return }
+    const code = await store.transaction(async trx => {
+      await store.with(trx).setAgentStatus(agent.id, 'active', now())
+      await audit.with(trx).append('admin', 'agent.enabled', { agentId: agent.id, name: agent.name })
+      return await issueConnectCode(trx, agent.id, req)
+    })
+    res.status(201).json({ id: agent.id, status: 'active', connectCode: code.connectCode, connectUrl: code.connectUrl, expiresAt: code.expiresAt })
+  }))
+
+  // Delete: hidden from the list and never usable again, but its requests, ledger and audit entries are kept.
+  // Refused (409) while company money is locked for it: an open vault or unspent request vaults.
+  admin.delete('/agents/:id', wrap(async (req, res) => {
+    const r = await control.retireAgent(String(req.params.id), 'deleted')
+    res.json({ id: r.agent.id, status: r.agent.status, deniedRequests: r.deniedRequests })
+  }))
+
+  // ?deleted=1 also lists deleted agents.
+  admin.get('/agents', wrap(async (req, res) => {
+    const includeDeleted = req.query.deleted === '1' || req.query.deleted === 'true'
+    const agents = await store.listAgents({ includeDeleted })
     const vaults = new Map((await vault.listVaults()).map(v => [v.agentId, v]))
     res.json({
       agents: await Promise.all(agents.map(async a => {
@@ -205,7 +313,10 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         return {
           id: a.id,
           name: a.name,
-          key: maskAgentKey(a.keyHint),
+          status: a.status,
+          // No hint: the agent has not connected (or its key was revoked for a new code).
+          key: a.keyHint === '' ? null : maskAgentKey(a.keyHint),
+          connected: a.keyHint !== '',
           createdAt: iso(a.createdAt),
           rules: await store.getRules(a.id),
           vault: v === undefined
@@ -217,13 +328,15 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   }))
 
   admin.put('/agents/:id/rules', wrap(async (req, res) => {
-    const agent = await store.getAgent(String(req.params.id))
-    if (agent === undefined) { res.status(404).json({ error: 'agent not found' }); return }
+    const agent = await liveAgent(String(req.params.id))
     const rules = parseRules(req.body)
     if (typeof rules === 'string') { res.status(400).json({ error: rules }); return }
-    const before = await store.getRules(agent.id)
-    await store.setRules(agent.id, rules)
-    await audit.append('admin', 'agent.rules_changed', { agentId: agent.id, before, after: rules })
+    await store.transaction(async trx => {
+      const s = store.with(trx)
+      const before = await s.getRules(agent.id)
+      await s.setRules(agent.id, rules)
+      await audit.with(trx).append('admin', 'agent.rules_changed', { agentId: agent.id, before, after: rules })
+    })
     res.json({ id: agent.id, rules })
   }))
 
@@ -269,10 +382,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   }))
 
   // ── Vaults (the company funds and reclaims them from its own wallet) ─────
-  const knownAgent = async (id: string): Promise<string> => {
-    if (await store.getAgent(id) === undefined) throw new ProxyError(404, 'agent not found')
-    return id
-  }
+  const knownAgent = async (id: string): Promise<string> => (await liveAgent(id)).id
 
   admin.get('/vaults', wrap(async (_req, res) => {
     const vaults = await vault.listVaults()
@@ -350,8 +460,9 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
   const anchorView = (a: { seq: number, hash: string, txid: string, at: number }): Record<string, unknown> =>
     ({ seq: a.seq, hash: a.hash, txid: a.txid, at: iso(a.at), explorerUrl: txLink(a.txid, network) })
 
+  // The head, how many entries no anchor covers yet, and whether the log got shorter than an anchor (deleted tail).
   admin.get('/audit/head', wrap(async (_req, res) => {
-    res.json(await audit.head())
+    res.json(await audit.status())
   }))
 
   // ?after=<seq>&limit=<n>: entries with seq > after, oldest first; without `after`, the last `limit` entries.
@@ -367,8 +478,10 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
     })
   }))
 
-  admin.get('/audit/verify', wrap(async (_req, res) => {
-    const v = await audit.verify()
+  // Incremental by default (only entries after the last verified one); ?full=1 re-checks the whole chain.
+  admin.get('/audit/verify', wrap(async (req, res) => {
+    const full = req.query.full === '1' || req.query.full === 'true'
+    const v = await audit.verify({ full })
     res.json({ ...v, anchors: v.anchors.map(a => ({ ...anchorView(a), matches: a.matches })) })
   }))
 
