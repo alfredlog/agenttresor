@@ -10,8 +10,9 @@ import { createAgentServiceApp } from './app.js'
 import { acquirePidLock, AlreadyRunningError } from './control.js'
 import { migrateLegacyProfile } from '../agent/profiles.js'
 import { AgentRegistry } from './registry.js'
+import { readCodeVersion } from './version.js'
 
-const { dataDir, port, host, token } = loadEnv()
+const { dataDir, port, host, token, projectRoot } = loadEnv()
 const log = (msg: string): void => { process.stdout.write(`${new Date().toISOString()} ${msg}\n`) }
 
 let release: () => Promise<void>
@@ -28,12 +29,16 @@ try {
   if (migrated.status === 'skipped') log(`migration skipped: ${migrated.reason}`)
 
   const registry = new AgentRegistry(dataDir, log)
-  const app = createAgentServiceApp({ registry, host, token, log })
+  // Read once: after a git pull the service keeps reporting the code it started with, so setup/doctor see it is stale.
+  const version = await readCodeVersion(projectRoot)
+  const app = createAgentServiceApp({ registry, host, token, version, log })
   const server: Server = await new Promise((resolve, reject) => {
     const s = app.listen(port, host, () => { resolve(s) })
     s.once('error', reject)
   })
-  log(`agent service on http://${host}:${port} (pid ${process.pid})`)
+  log(`agent service on http://${host}:${port} (pid ${process.pid}, code ${version.id})`)
+  const activeId = await registry.activeAgent()
+  log(activeId === undefined ? 'no active agent yet: /mcp answers 404 until npm run agents use <agentId>' : `active agent ${activeId}: MCP at http://${host}:${port}/mcp`)
   for (const agent of await registry.loadAll()) {
     const state = agent.setup.disconnected ?? 'ready'
     log(`[${agent.agentId}] ${state}; MCP at http://${host}:${port}/agents/${agent.agentId}/mcp; fingerprint ${agent.setup.fingerprint ?? 'none yet'}`)

@@ -40,7 +40,7 @@ describe('funding', () => {
     const before = await spendableSats(h.company)
     const funded = await fundVault(h.company, h.url, ADMIN_TOKEN, agent.id, 50_000, fp(agent))
     expect(funded.txid).toMatch(/^[0-9a-f]{64}$/)
-    expect((await budget(agent)).vault).toEqual({ status: 'open', satoshis: 50_000, outpoint: `${funded.txid}.${funded.vout}` })
+    expect((await budget(agent)).vault).toEqual({ status: 'open', satoshis: 50_000, outpoint: `${funded.txid}.${funded.vout}`, version: 1, covenant: null })
     expect(await spendableSats(h.company)).toBeLessThan(before - 50_000)
     const listed = (await h.admin('/admin/vaults')).body.vaults.find((v: any) => v.agentId === agent.id)
     expect(listed).toMatchObject({ status: 'open', satoshis: 50_000, explorerUrl: `https://test.whatsonchain.com/tx/${funded.txid}` })
@@ -119,7 +119,7 @@ describe('paying from the vault', () => {
       expect(onChain.outputs.map(o => o.satoshis)).toEqual(tx.outputs.map(o => o.satoshis))
 
       const after = (await budget(agent)).vault
-      expect(after).toEqual({ status: 'open', satoshis: vault.satoshis - REPORT_PRICE_SATS - answer.feeSats, outpoint: `${txid}.1` })
+      expect(after).toEqual({ status: 'open', satoshis: vault.satoshis - REPORT_PRICE_SATS - answer.feeSats, outpoint: `${txid}.1`, version: 1, covenant: null })
       vault = after
     }
     // Fees come out of the vault but not out of the daily budget.
@@ -260,7 +260,7 @@ describe('reclaim', () => {
     expect(reclaimed.satoshis).toBe(30_000)
     const after = await spendableSats(h.company)
     expect(after).toBeGreaterThan(before + 29_000) // the vault minus a small fee
-    expect((await budget(agent)).vault).toEqual({ status: 'closed', satoshis: 0, outpoint: null })
+    expect((await budget(agent)).vault).toEqual({ status: 'closed', satoshis: 0, outpoint: null, version: null, covenant: null })
 
     // A closed vault pays nothing.
     const res = await h.pay(agent, report())

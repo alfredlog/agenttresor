@@ -92,6 +92,12 @@ export async function stopLaunchdService (): Promise<void> {
   await run('launchctl', ['bootout', `${domain()}/${LAUNCHD_LABEL}`]).catch(() => {})
 }
 
+/** Restarts the running launchd service in place (kill, then start again: picks up new code). */
+export async function kickstartLaunchdService (): Promise<void> {
+  assertUserAccount()
+  await run('launchctl', ['kickstart', '-k', `${domain()}/${LAUNCHD_LABEL}`])
+}
+
 /** Starts the installed service again after stopLaunchdService. */
 export async function startLaunchdService (): Promise<void> {
   assertUserAccount()

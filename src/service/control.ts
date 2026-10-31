@@ -83,6 +83,8 @@ export async function acquirePidLock (dataDir: string, pid = process.pid): Promi
 export interface Health {
   ok: boolean
   pid?: number
+  /** The code the service runs; missing from services older than this field (always stale). */
+  version?: { package: string, commit: string, id: string }
 }
 
 /** Asks the running service whether it is up. */

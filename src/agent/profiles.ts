@@ -3,6 +3,7 @@
  * (mode 0700) holding its agent-config.json, its own agent-key.json and, once
  * a tunnel was opened, its tunnel secret (all mode 0600). A profile's key is
  * created in its own directory and never copied to another profile.
+ * MCP_DATA_DIR/active names the active agent, the one served at /mcp.
  */
 import { randomBytes } from 'node:crypto'
 import { access, chmod, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
@@ -165,4 +166,56 @@ export async function rotateTunnelSecret (dir: string): Promise<string> {
 /** The existing secret, or a new one. */
 export async function ensureTunnelSecret (dir: string): Promise<string> {
   return (await readTunnelSecret(dir)) ?? await rotateTunnelSecret(dir)
+}
+
+// ── The active agent: the one the service serves at /mcp and /v1 ─────────────
+
+/** MCP_DATA_DIR/active: the active agent's id (mode 0600). */
+export const ACTIVE_FILE = 'active'
+
+/** The active agent's id, if one is set and its profile still exists. */
+export async function readActiveAgent (dataDir: string): Promise<string | undefined> {
+  let id: string
+  try {
+    id = (await readFile(join(dataDir, ACTIVE_FILE), 'utf8')).trim()
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw err
+  }
+  if (!isAgentId(id)) return undefined
+  return await exists(profileDir(dataDir, id)) ? id : undefined
+}
+
+/** Makes `agentId` the active agent. Written to a temporary file and renamed, so the service never reads half a file. */
+export async function setActiveAgent (dataDir: string, agentId: string): Promise<void> {
+  if (!await exists(profileDir(dataDir, agentId))) throw new Error(`no agent ${agentId} on this machine; see npm run agents`)
+  await mkdir(dataDir, { recursive: true, mode: 0o700 })
+  const path = join(dataDir, ACTIVE_FILE)
+  const tmp = `${path}.${process.pid}.tmp`
+  await writeFile(tmp, `${agentId}\n`, { mode: 0o600 })
+  await chmod(tmp, 0o600)
+  await rename(tmp, path)
+}
+
+/**
+ * With no active agent, makes the only connected one active, or the most
+ * recently connected (newest agent-config.json). Returns the active agent and
+ * whether it was just chosen; undefined if no agent is connected.
+ */
+export async function chooseActiveIfNone (dataDir: string): Promise<{ agentId: string, chosen: boolean } | undefined> {
+  const current = await readActiveAgent(dataDir)
+  if (current !== undefined) return { agentId: current, chosen: false }
+  const connected = (await listProfiles(dataDir)).filter(p => p.config !== undefined)
+  if (connected.length === 0) return undefined
+  const dated = await Promise.all(connected.map(async p => ({ p, mtime: (await stat(join(p.dir, AGENT_CONFIG_FILE))).mtimeMs })))
+  dated.sort((a, b) => b.mtime - a.mtime || a.p.agentId.localeCompare(b.p.agentId))
+  await setActiveAgent(dataDir, dated[0].p.agentId)
+  return { agentId: dated[0].p.agentId, chosen: true }
+}
+
+/** Makes `agentId` active only if no agent is: a second agent set up on this machine does not take over. */
+export async function activateIfNone (dataDir: string, agentId: string): Promise<boolean> {
+  if (await readActiveAgent(dataDir) !== undefined) return false
+  await setActiveAgent(dataDir, agentId)
+  return true
 }

@@ -37,9 +37,5 @@ export function loadEnv (env: NodeJS.ProcessEnv = process.env): ServiceEnv {
 
 /** The local base URL MCP clients use (always loopback, even when MCP_HOST is wider). */
 export const localBase = (port: number): string => `http://127.0.0.1:${port}`
+/** One agent's own MCP address; clients use the active agent's /mcp instead (client-config.ts). */
 export const mcpUrl = (port: number, agentId: string): string => `${localBase(port)}/agents/${agentId}/mcp`
-
-/** The .mcp.json for Claude Code, pointing at one agent of the local service. */
-export function mcpJsonFor (port: number, agentId: string): string {
-  return `${JSON.stringify({ mcpServers: { agenttresor: { type: 'http', url: mcpUrl(port, agentId) } } }, null, 2)}\n`
-}
