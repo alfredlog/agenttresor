@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { getPrice, type AgentPayer, type PayResult } from '../agent/pay.js'
 import type { ProxyClient } from '../agent/proxy-client.js'
 import { fingerprint } from '../shared/fingerprint.js'
+import type { TokenKit } from '../token/token.js'
 
 export const SERVER_INSTRUCTIONS = [
   'AgentTresor pays online services (HTTP 402, paid in BSV) from a budget your company controls.',
@@ -29,6 +30,9 @@ export interface AgentToolsOptions {
   /** The agent's public signing key (its private key never leaves agent-key.json). */
   agentPublicKey: string
   version?: string
+  tokenKit?: TokenKit
+  tokenId?: string
+  companyIdentityKey?: string
 }
 
 type ToolResult = { content: Array<{ type: 'text', text: string }>, isError?: boolean }
@@ -126,6 +130,74 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
       `Payments above ${b.rules.approvalThresholdSats} sats need a human approval; above ${b.rules.maxPerPaymentSats} sats they are refused.`, b)
   }))
 
+  server.registerTool('check_token_balance', {
+    title: 'Check token balance',
+    description: 'Shows this agent’s BSV-21 token balance in the overlay and its local wallet basket. This is a token balance, not a satoshi balance.',
+    annotations: { readOnlyHint: true }
+  }, async () => await safe(async () => {
+    const kit = opts.tokenKit
+    const tokenId = opts.tokenId
+    if (kit === undefined || tokenId === undefined) {
+      return reply('BSV-21 is not configured for this agent yet.')
+    }
+
+    const balance = (await kit.balances()).find(item => item.tokenId === tokenId)
+
+    if (balance === undefined) {
+      return reply('No balance found for the configured token.', {
+        tokenId,
+        overlay: '0',
+        basket: '0'
+      })
+    }
+
+    const data = {
+      tokenId: balance.tokenId,
+      symbol: balance.sym,
+      overlay: balance.overlay.toString(),
+      basket: balance.basket.toString(),
+      utxos: balance.utxos
+    }
+    return reply(`Token balance: ${data.overlay} in the overlay and ${data.basket} in the local wallet.`, data)
+  }))
+  server.registerTool('sync_token_wallet', {
+    title: 'Sync token wallet',
+    description: 'Synchronizes this agent’s local BSV-21 wallet with the overlay. It does not send or spend tokens.',
+    annotations: { readOnlyHint: false }
+  }, async () => await safe(async () => {
+    const kit = opts.tokenKit
+    if (kit === undefined) {
+      return reply('BSV-21 is not configured for this agent yet.')
+    }
+
+    const result = await kit.sync()
+    return reply('Token wallet synchronized with the overlay.', result)
+  }))
+  server.registerTool('send_tokens_to_company', {
+    title: 'Send tokens to company',
+    description: 'Transfers BSV-21 tokens to the configured company identity. This creates an on-chain transaction. Use only when the user explicitly asks to transfer tokens.',
+    inputSchema: {
+      amount: z.string().regex(/^[1-9][0-9]*$/).describe('Positive whole number of token units to transfer')
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true }
+  }, async ({ amount }) => await safe(async () => {
+    const kit = opts.tokenKit
+    const tokenId = opts.tokenId
+    const companyIdentityKey = opts.companyIdentityKey
+
+    if (kit === undefined || tokenId === undefined || companyIdentityKey === undefined) {
+      return reply('Token transfer is not configured. Check the BSV-21 overlay URL, token ID, and company identity key.')
+    }
+
+    await kit.sync()
+    const result = await kit.send(tokenId, BigInt(amount), companyIdentityKey)
+    return reply(`Transferred ${amount} token units to the company.`, {
+      tokenId,
+      amount,
+      txid: result.txid
+    })
+  }))
+
   server.registerTool('get_price', {
     title: 'Get price',
     description: 'Asks the merchant for the exact price of a request without paying (HTTP 402 challenge). ' +
@@ -144,7 +216,7 @@ export function createAgentMcpServer (opts: AgentToolsOptions): McpServer {
     description: 'Pays for one request through the company\'s spend control and returns the merchant\'s answer. ' +
       'The agent checks the merchant\'s price itself, refuses above maxSats, and signs the vault payment only if it pays exactly that price. ' +
       'Results: paid (with txid and the answer), pending (needs a human approval: report the request id, do not retry), ' +
-      'denied (explain the reason to the user, never retry), paid_not_delivered, or failed.',
+      'denied (explain the reason, never retry), paid_not_delivered, or failed.',
     inputSchema: {
       ...requestShape,
       purpose: z.string().trim().min(3).max(500).describe('Why you are paying, in plain words. It goes into the company\'s audit log.'),

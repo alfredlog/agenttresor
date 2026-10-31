@@ -12,9 +12,12 @@ import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { loadOrCreateAgentKey, registerAgentKey } from '../agent/keys.js'
+import { openAgentTokenWallet } from '../agent/token-wallet.js'
 import { fingerprint } from '../shared/fingerprint.js'
 import { AgentPayer } from '../agent/pay.js'
 import { ProxyClient } from '../agent/proxy-client.js'
+import { OverlayClient } from '../token/overlayApi.js'
+import { TokenKit } from '../token/token.js'
 import { createMcpHttpApp } from './http.js'
 import { createAgentMcpServer } from './server.js'
 
@@ -36,13 +39,56 @@ const client = new ProxyClient({ proxyUrl: required('PROXY_URL'), apiKey: requir
 
 const agentKey = await loadOrCreateAgentKey(dataDir)
 log(`${agentKey.created ? 'created' : 'loaded'} agent key ${agentKey.publicKey.slice(0, 16)}… (${agentKey.path})`)
-// stderr only: on stdio, stdout belongs to the MCP protocol. The company checks this before funding.
 log(`Agent key fingerprint: ${fingerprint(agentKey.publicKey)}`)
 const registration = await registerAgentKey(client, agentKey.publicKey)
-log(registration === 'registered' ? 'agent key registered with the proxy; the company can now fund the vault' : 'vault already open with this agent key')
+log(registration === 'registered'
+  ? 'agent key registered with the proxy; the company can now fund the vault'
+  : 'vault already open with this agent key')
 
 const payer = new AgentPayer({ client, key: agentKey.key })
-const createServer = () => createAgentMcpServer({ payer, client, merchantUrls, agentPublicKey: agentKey.publicKey })
+
+const tokenOverlayUrl = process.env.BSV21_OVERLAY_URL?.trim() ?? ''
+const tokenId = process.env.BSV21_TOKEN_ID?.trim() ?? ''
+let tokenKit: TokenKit | undefined
+let closeTokenWallet: (() => Promise<void>) | undefined
+
+if ((tokenOverlayUrl === '') !== (tokenId === '')) {
+  throw new Error('Set both BSV21_OVERLAY_URL and BSV21_TOKEN_ID to enable BSV-21 balance checking')
+}
+
+if (tokenOverlayUrl !== '' && tokenId !== '') {
+  const tokenWallet = await openAgentTokenWallet(
+    agentKey.key,
+    join(dataDir, 'agent-token-wallet.sqlite')
+  )
+  tokenKit = new TokenKit(tokenWallet.wallet, new OverlayClient(tokenOverlayUrl))
+  closeTokenWallet = tokenWallet.close
+  log(`BSV-21 balance checking enabled for token ${tokenId}`)
+} else {
+  log('BSV-21 balance checking is not configured')
+}
+
+const createServer = () => createAgentMcpServer({
+  payer,
+  client,
+  merchantUrls,
+  agentPublicKey: agentKey.publicKey,
+  tokenKit,
+  tokenId: tokenId || undefined,
+  companyIdentityKey: process.env.BSV21_COMPANY_IDENTITY_KEY?.trim() || undefined,
+})
+
+const shutdown = async (): Promise<void> => {
+  try {
+    await closeTokenWallet?.()
+  } catch (err) {
+    log(`could not close token wallet: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    process.exit(0)
+  }
+}
+process.once('SIGINT', () => { void shutdown() })
+process.once('SIGTERM', () => { void shutdown() })
 
 if (process.argv.includes('--http')) {
   const host = process.env.MCP_HOST ?? '127.0.0.1'
