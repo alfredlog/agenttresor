@@ -1,5 +1,16 @@
 # AgentTresor
 
+**Let AI agents pay for things without ever holding your money: the budget sits in an on-chain BSV vault, and every payment needs your rules' signature.**
+
+**Live on BSV mainnet:** real vault fundings, agent payments, a covenant payment and audit anchors, with WhatsOnChain links, in [docs/mainnet-transactions.md](docs/mainnet-transactions.md).
+
+**Quick tour**
+1. **Dashboard** (`/`, `npm run proxy`): create an agent with its rules (in sats or euros), approve or deny payments above the threshold, follow the ledger and the hash-chained audit log.
+2. **Vault page** (`/vault.html`): check the agent's key fingerprint, then fund its vault from BSV Desktop; reclaim it alone at any time.
+3. **Agent setup**: on the agent's machine, `npm run setup "<connection link>"` connects it, runs the local agent service and sets up Claude Code.
+4. **Claude buys a report**: ask Claude in a new session; it calls `check_budget`, `get_price` and `pay_and_fetch`, and the merchant is paid from the vault.
+5. **WhatsOnChain**: open the payment from the dashboard's ledger and see the agent and policy signatures, the change back to the vault and the audit anchor.
+
 Non-custodial spend control for AI agents on BSV (TUM Blockchain & AI Hackathon 2026, BSV track).
 Companies lock a budget in an on-chain vault (2-of-2: agent AND policy, or the company alone);
 agents pay merchants with BRC-121 only when the company's rules allow it.
