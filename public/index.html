@@ -4,98 +4,319 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AgentTresor Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
   <style>
-    :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --card: #fff; --ok: #1f7a4d; --warn: #9a6200; --bad: #b3261e; --accent: #2b59c3; }
-    @media (prefers-color-scheme: dark) {
-      :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --card: #1f1f1d; --ok: #5cc28f; --warn: #e0a84a; --bad: #f08a80; --accent: #8fb0ff; }
+    /* ── AgentTresor design system (the same block in index.html, vault.html, connect.html and src/service/panel.ts) ── */
+    :root {
+      color-scheme: dark;
+      --bg: #0E1219; --panel: #171D29; --panel-2: #1F2736; --line: #2C3648;
+      --text: #F4F1EA; --text-2: #B9C3D3; --muted: #7C889B;
+      --amber: #F2B544; --blue: #6E9BFF; --green: #5FD08A; --red: #FF6B5E;
+      --amber-bg: rgba(242, 181, 68, .12); --blue-bg: rgba(110, 155, 255, .12); --green-bg: rgba(95, 208, 138, .12); --red-bg: rgba(255, 107, 94, .12);
+      --on-accent: #0E1219;
+      --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 8px 24px rgba(0, 0, 0, .25);
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --radius: 12px;
+      /* Older names, still used by some markup. */
+      --fg: var(--text); --card: var(--panel); --ok: var(--green); --warn: var(--amber); --bad: var(--red); --accent: var(--blue);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --bg: #F5F3EE; --panel: #FFFFFF; --panel-2: #F0EDE6; --line: #DCD7CC;
+        --text: #171C27; --text-2: #465165; --muted: #6E7787;
+        --amber: #A86F00; --blue: #2F5FD0; --green: #1C8447; --red: #C3362A;
+        --amber-bg: rgba(168, 111, 0, .10); --blue-bg: rgba(47, 95, 208, .09); --green-bg: rgba(28, 132, 71, .10); --red-bg: rgba(195, 54, 42, .09);
+        --on-accent: #FFFFFF;
+        --shadow: 0 1px 2px rgba(23, 28, 39, .06), 0 6px 18px rgba(23, 28, 39, .05);
+      }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
-    main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
-    h1 { font-size: 20px; margin: 0 0 4px; }
-    h2 { font-size: 15px; margin: 28px 0 10px; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); font-feature-settings: "cv11", "ss01"; -webkit-font-smoothing: antialiased; }
+    main { max-width: 1200px; margin: 0 auto; padding: 24px 24px 64px; }
+    h1, h2, h3 { margin: 0; letter-spacing: -.01em; }
+    h1 { font-size: 22px; font-weight: 700; }
+    h2 { font-size: 15px; font-weight: 650; }
+    p { margin: 8px 0 0; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: var(--mono); font-size: 12.5px; }
+    .num, .mono, .tabular { font-variant-numeric: tabular-nums; }
     .muted { color: var(--muted); }
-    .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 16px 0; }
-    input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); min-width: 0; width: 100%; }
-    .bar input { width: auto; min-width: 260px; }
-    button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
-    button.approve, a.approve { border-color: var(--ok); color: var(--ok); }
-    a.approve { display: inline-block; font: inherit; padding: 6px 12px; border: 1px solid var(--ok); border-radius: 6px; text-decoration: none; }
-    button.deny { border-color: var(--bad); color: var(--bad); }
-    button.primary { border-color: var(--accent); color: var(--accent); }
-    .table { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    th { font-weight: 600; color: var(--muted); font-size: 12px; }
-    tr:last-child td { border-bottom: 0; }
-    td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-    .url { max-width: 280px; word-break: break-all; }
-    .status-paid { color: var(--ok); }
-    .status-paid_not_delivered { color: var(--warn); }
-    a { color: var(--accent); }
-    #error { color: var(--bad); }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-top: 12px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-    label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
-    .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
-    .rules { font-size: 12px; line-height: 1.6; }
-    .fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; letter-spacing: .02em; }
-    #code-box { border-color: var(--ok); }
-    #code-box input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-    .code-big { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; font-weight: 700; letter-spacing: .08em; margin: 10px 0 4px; }
-    .expired { color: var(--bad); font-weight: 600; }
-    .warn { color: var(--warn); font-weight: 600; }
-    .hint { font-size: 13px; }
-    .chain-ok { color: var(--ok); font-weight: 600; }
-    .chain-bad { color: var(--bad); font-weight: 600; }
-    td.details { font-size: 12px; max-width: 420px; word-break: break-word; }
-    #audit-msg.failed { color: var(--bad); }
-    .unanchored { color: var(--warn); font-weight: 600; }
-    #audit-alert { border: 1px solid var(--bad); color: var(--bad); background: var(--card); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-weight: 600; }
-    .agent-disabled { color: var(--warn); font-weight: 600; }
-    .agent-deleted { color: var(--muted); font-weight: 600; }
-    tr.deleted td { opacity: .6; }
-    .toggle { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; margin-left: 12px; }
-    .toggle input { width: auto; }
-    td.agent-actions button { margin: 0 4px 4px 0; }
-    .banner { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; border: 1px solid var(--warn); color: var(--warn); background: var(--card); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; font-weight: 600; }
-    .banner.empty { border-color: var(--bad); color: var(--bad); }
-    .banner button { font-weight: 400; }
-    .notary-ok { color: var(--ok); font-weight: 600; }
-    .notary-low { color: var(--warn); font-weight: 600; }
-    .notary-empty { color: var(--bad); font-weight: 600; }
-    #notary-amount { width: 140px; }
-    #notary-msg.failed { color: var(--bad); }
+    .secondary { color: var(--text-2); }
+    .hint { font-size: 13px; color: var(--text-2); }
     [hidden] { display: none !important; }
+    :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 6px; }
+
+    /* Top bar */
+    .topbar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+    .topbar-inner { max-width: 1200px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 60px; }
+    .wordmark { display: inline-flex; align-items: center; gap: 10px; font-weight: 750; font-size: 17px; letter-spacing: -.02em; color: var(--text); }
+    .wordmark:hover { text-decoration: none; }
+    .wordmark .mark { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--amber), #E08A2E); display: grid; place-items: center; color: #0E1219; font-size: 14px; font-weight: 800; }
+    .topbar nav { display: flex; gap: 4px; margin-left: 8px; }
+    .topbar nav a { color: var(--text-2); padding: 6px 10px; border-radius: 8px; font-size: 13px; font-weight: 550; }
+    .topbar nav a:hover, .topbar nav a[aria-current="page"] { background: var(--panel-2); color: var(--text); text-decoration: none; }
+    .spacer { flex: 1; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text-2); font-size: 12.5px; white-space: nowrap; }
+    .chip .mono { font-size: 12px; color: var(--text); }
+
+    /* Pills and badges */
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 18px; white-space: nowrap; background: var(--panel-2); color: var(--text-2); }
+    .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .pill.green { background: var(--green-bg); color: var(--green); }
+    .pill.red { background: var(--red-bg); color: var(--red); }
+    .pill.amber { background: var(--amber-bg); color: var(--amber); }
+    .pill.blue { background: var(--blue-bg); color: var(--blue); }
+    .pill.plain::before { display: none; }
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; font: 600 11px/18px var(--mono); border: 1px solid var(--line); color: var(--text-2); white-space: nowrap; }
+    .badge.amber { border-color: color-mix(in srgb, var(--amber) 55%, transparent); color: var(--amber); background: var(--amber-bg); }
+    .badge.blue { border-color: color-mix(in srgb, var(--blue) 55%, transparent); color: var(--blue); background: var(--blue-bg); }
+
+    /* Cards and sections */
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
+    .section { margin-top: 20px; }
+    .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .card-head h2 { display: flex; align-items: center; gap: 8px; }
+    .card-head .count { font: 600 12px/20px var(--mono); padding: 0 8px; border-radius: 999px; background: var(--panel-2); color: var(--text-2); min-width: 26px; text-align: center; }
+    .card.accent-amber { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: linear-gradient(180deg, var(--amber-bg), transparent 140px), var(--panel); }
+    .card.accent-amber .card-head h2 { color: var(--amber); }
+    .card.accent-amber .count { background: var(--amber); color: var(--on-accent); }
+    .card.accent-blue { border-color: color-mix(in srgb, var(--blue) 40%, var(--line)); }
+    .card.accent-green { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+
+    /* Summary tiles: fixed heights, so the 5 s refresh never moves the layout */
+    .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
+    .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; min-height: 108px; display: flex; flex-direction: column; gap: 6px; box-shadow: var(--shadow); }
+    .tile-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; display: flex; align-items: center; gap: 8px; }
+    .tile-label::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--tile, var(--blue)); }
+    .tile-value { font: 650 28px/34px var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; color: var(--text); height: 34px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile-sub { font-size: 12.5px; color: var(--text-2); height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile.amber { --tile: var(--amber); } .tile.blue { --tile: var(--blue); } .tile.green { --tile: var(--green); } .tile.red { --tile: var(--red); }
+    .tile.alert { border-color: color-mix(in srgb, var(--tile) 55%, var(--line)); }
+    .tile.alert .tile-value { color: var(--tile); }
+
+    /* Tables */
+    .table { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .card .table { border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-size: 11px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; background: var(--panel-2); white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+    td.num, th.num { text-align: right; }
+    td.num { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td.empty, li.empty { text-align: center; color: var(--muted); padding: 28px 16px; font-size: 13.5px; }
+    .url { max-width: 300px; word-break: break-all; color: var(--text-2); }
+    .sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Forms */
+    /* Flex, not grid: a label's text and its unit (<span data-unit>) stay on one line, the field wraps below. */
+    label { display: flex; flex-wrap: wrap; align-items: baseline; row-gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+    label > input, label > select { flex: 1 0 100%; }
+    label > input[type="checkbox"] { flex: none; }
+    input, select { font: inherit; font-size: 14px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); min-width: 0; width: 100%; transition: border-color .15s, box-shadow .15s; }
+    input::placeholder { color: var(--muted); }
+    /* The select follows the theme: no native light box, a drawn chevron, dark options. */
+    select { appearance: none; -webkit-appearance: none; padding-right: 34px; cursor: pointer; background-image: linear-gradient(45deg, transparent 50%, var(--text-2) 50%), linear-gradient(135deg, var(--text-2) 50%, transparent 50%); background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%; background-size: 5px 5px; background-repeat: no-repeat; }
+    select option { background: var(--panel-2); color: var(--text); }
+    input:focus, select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-bg); }
+    input[type="checkbox"] { width: 18px; height: 18px; padding: 0; accent-color: var(--green); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+    .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+    .check { display: flex; flex-direction: row; gap: 10px; align-items: center; font-size: 13.5px; font-weight: 550; color: var(--text); margin-top: 12px; cursor: pointer; }
+
+    /* Buttons */
+    button, a.button, a.approve { font: inherit; font-size: 13.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s, opacity .15s; text-decoration: none; }
+    button:hover:not(:disabled), a.button:hover, a.approve:hover { border-color: var(--text-2); text-decoration: none; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { background: var(--blue); border-color: var(--blue); color: var(--on-accent); }
+    button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--blue) 85%, white); border-color: transparent; }
+    button.money, a.approve, button.approve, button.ok { background: var(--amber); border-color: var(--amber); color: var(--on-accent); }
+    button.money:hover:not(:disabled), a.approve:hover, button.approve:hover:not(:disabled), button.ok:hover:not(:disabled) { background: color-mix(in srgb, var(--amber) 85%, white); border-color: transparent; }
+    button.deny { background: transparent; border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red); }
+    button.deny:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red); }
+    button.ghost { background: transparent; }
+    button.small, a.small { min-height: 30px; padding: 0 10px; font-size: 12.5px; }
+    /* Loading and success states (vault page): the label stays, a spinner or a check is added. */
+    button.loading { cursor: progress; opacity: .85 !important; }
+    button.loading::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; }
+    button.done { background: var(--green) !important; border-color: var(--green) !important; color: var(--on-accent) !important; }
+    button.done::before { content: "✓"; font-weight: 800; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { button.loading::before { animation-duration: 2.4s; } }
+
+    /* Keys, fingerprints, codes */
+    .fp { font-family: var(--mono); font-weight: 650; letter-spacing: .04em; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td.mono, .sub.mono, .nowrap { white-space: nowrap; }
+    td.url, td.details { white-space: normal; }
+    .fp-big { display: block; font: 700 clamp(26px, 6vw, 40px)/1.15 var(--mono); letter-spacing: .06em; color: var(--amber); margin: 10px 0 2px; word-break: break-all; }
+    .ok-text { color: var(--green); } .bad-text { color: var(--red); } .warn-text { color: var(--amber); }
+
+    /* Steps (vault page) */
+    .steps { display: grid; gap: 14px; counter-reset: step; }
+    .step { position: relative; padding-left: 58px; }
+    .step::before { counter-increment: step; content: counter(step); position: absolute; left: 20px; top: 20px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 700 13px/1 var(--mono); background: var(--panel-2); color: var(--text-2); border: 1px solid var(--line); }
+    .step.current::before { background: var(--blue); color: var(--on-accent); border-color: var(--blue); }
+    .step.complete::before { content: "✓"; background: var(--green); color: var(--on-accent); border-color: var(--green); }
+    .step h3 { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+
+    /* Timeline (vault page activity) */
+    .timeline { list-style: none; margin: 0; padding: 0 0 0 18px; position: relative; display: grid; gap: 12px; }
+    .timeline::before { content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 2px; background: var(--line); border-radius: 2px; }
+    .timeline li { position: relative; padding: 10px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; word-break: break-word; }
+    .timeline li::before { content: ""; position: absolute; left: -18px; top: 15px; width: 12px; height: 12px; border-radius: 50%; background: var(--panel); border: 2px solid var(--muted); }
+    .timeline li.ok::before { border-color: var(--green); background: var(--green); }
+    .timeline li.error { border-color: color-mix(in srgb, var(--red) 50%, var(--line)); color: var(--red); }
+    .timeline li.error::before { border-color: var(--red); background: var(--red); }
+    .timeline li.info::before { border-color: var(--blue); }
+    .timeline .time { display: block; font: 12px var(--mono); color: var(--muted); margin-bottom: 2px; }
+    .timeline li.empty { background: transparent; border-style: dashed; }
+    .timeline li.empty::before { display: none; }
+
+    /* Checklist (local panel) */
+    .checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .checklist li { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .checklist .icon { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 12px; color: var(--on-accent); background: var(--muted); }
+    .checklist li.ok .icon { background: var(--green); }
+    .checklist li.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+    .checklist li.bad .icon { background: var(--red); }
+    .checklist .name { font-weight: 650; }
+    .checklist .fix { margin-top: 6px; font-size: 13px; color: var(--text-2); }
+    .checklist .fix code { color: var(--amber); }
+
+    @media (max-width: 900px) {
+      .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      main { padding: 16px 14px 48px; }
+      .topbar-inner { padding: 10px 14px; gap: 8px; }
+      .topbar nav { margin-left: 0; order: 3; width: 100%; }
+      .card { padding: 16px; }
+      .tiles { gap: 10px; }
+      .tile { padding: 12px 14px; min-height: 96px; }
+      .tile-value { font-size: 22px; line-height: 30px; height: 30px; }
+      th, td { padding: 9px 10px; }
+      /* Narrow screens: tables keep readable columns and scroll sideways inside their card. */
+      .table table { min-width: 720px; }
+      /* .stack tables (e.g. pending approvals) turn each row into a small card instead, so their buttons stay in view. */
+      .table.stack table { min-width: 0; }
+      .table.stack thead { display: none; }
+      .table.stack tr { display: grid; gap: 6px; padding: 14px; border-bottom: 1px solid var(--line); }
+      .table.stack tbody tr:last-child { border-bottom: 0; }
+      .table.stack td { display: block; border: 0; padding: 0; text-align: left; white-space: normal; }
+      .table.stack td.empty { padding: 14px 0; text-align: center; }
+      .step { padding-left: 50px; }
+      .step::before { left: 14px; top: 16px; }
+    }
+    /* ── end of the design system ── */
+    /* ── Dashboard ── */
+    .token-form { display: flex; gap: 8px; align-items: center; }
+    .token-form input { width: 220px; height: 32px; padding: 4px 10px; font-size: 13px; }
+    .token-form button, #token-change { min-height: 32px; }
+    #rate { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+    #error { margin-top: 16px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--red) 50%, var(--line)); background: var(--red-bg); color: var(--red); border-radius: 10px; font-weight: 550; }
+    #error:empty { display: none; }
+    .intro { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+    .intro p { margin: 0; color: var(--text-2); max-width: 760px; }
+    .toggle { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 550; color: var(--text-2); margin-left: auto; cursor: pointer; }
+    .toggle input { width: 16px; height: 16px; }
+    .agent-name { font-weight: 650; }
+    td.agent-actions { white-space: nowrap; text-align: right; }
+    td.agent-actions button { margin: 0 0 4px 4px; }
+    tr.deleted td { opacity: .55; }
+    .vault-sats { font: 650 14px var(--mono); color: var(--amber); font-variant-numeric: tabular-nums; }
+    .rules { font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+    .rules .mono { color: var(--text); }
+    td.details { font-size: 12px; max-width: 460px; word-break: break-word; color: var(--text-2); }
+    .pending-price { font: 650 15px var(--mono); color: var(--amber); }
+    td.pending-actions { white-space: nowrap; text-align: right; }
+    td.pending-actions > * { margin-left: 6px; }
+    #code-box { border-color: color-mix(in srgb, var(--green) 50%, var(--line)); background: linear-gradient(180deg, var(--green-bg), transparent 160px), var(--panel); }
+    #code-box .actions input { font-family: var(--mono); font-size: 12.5px; flex: 1 1 360px; }
+    .code-big { font: 700 34px/1.1 var(--mono); letter-spacing: .1em; margin: 12px 0 4px; color: var(--green); }
+    .expired { color: var(--red); font-weight: 650; }
+    .chain-ok { color: var(--green); font-weight: 650; }
+    .chain-bad { color: var(--red); font-weight: 650; }
+    #audit-status.chain-ok, #audit-status.chain-bad { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; }
+    #audit-status.chain-ok { background: var(--green-bg); }
+    #audit-status.chain-bad { background: var(--red-bg); }
+    #audit-status.chain-ok::before, #audit-status.chain-bad::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .unanchored { color: var(--amber); font-weight: 600; font-size: 13px; }
+    .unanchored:empty { display: none; }
+    #audit-msg.failed, #notary-msg.failed { color: var(--red); }
+    #audit-alert { border: 1px solid var(--red); color: var(--red); background: var(--red-bg); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-weight: 650; }
+    .subhead { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 10px; }
+    .subhead h3 { font-size: 13px; font-weight: 650; color: var(--text-2); text-transform: uppercase; letter-spacing: .06em; }
+    .banner { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; border: 1px solid var(--amber); color: var(--amber); background: var(--amber-bg); border-radius: 10px; padding: 10px 14px; margin-top: 16px; font-weight: 650; }
+    .banner.empty { border-color: var(--red); color: var(--red); background: var(--red-bg); }
+    .notary-ok { color: var(--green); font-weight: 650; }
+    .notary-low { color: var(--amber); font-weight: 650; }
+    .notary-empty { color: var(--red); font-weight: 650; }
+    #notary-actions label { flex-direction: row; display: flex; align-items: center; gap: 8px; }
+    #notary-amount { width: 140px; }
+    .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+    .two > .card { margin-top: 0; }
+    @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
+    @media (max-width: 640px) {
+      .token-form input { width: 150px; }
+      #rate { max-width: 100%; }
+      td.pending-actions { text-align: left; }
+      .table.wide table { min-width: 1060px; }
+      td.pending-actions > * { margin: 4px 6px 0 0; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <h1>AgentTresor</h1>
-  <div class="muted">Spend control for AI agents. Create agents and set their rules, approve or deny payments above the threshold; every payment is in the ledger. <a href="vault.html">Fund or reclaim vaults</a></div>
-
-  <div class="bar">
-    <input id="token" type="password" placeholder="Admin token" autocomplete="off">
-    <button id="save">Use token</button>
-    <span id="error"></span>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="wordmark" href="/"><span class="mark">A</span>AgentTresor</a>
+    <nav><a href="/" aria-current="page">Dashboard</a><a href="vault.html">Vaults</a></nav>
+    <span class="spacer"></span>
+    <span id="network" class="chip" title="BSV network">—</span>
+    <span id="rate" class="chip" title="BSV/EUR rate used for euro budgets" hidden></span>
+    <div id="token-form" class="token-form">
+      <input id="token" type="password" placeholder="Admin token" autocomplete="off" aria-label="Admin token">
+      <button id="save" class="primary small">Use token</button>
+    </div>
+    <div id="token-set" hidden><button id="token-change" class="ghost small" title="Use another admin token">Admin token set · change</button></div>
   </div>
+</header>
+<main>
+  <div class="intro">
+    <h1>Spend control</h1>
+    <p>Agents pay merchants from vaults you fund. Payments above a threshold wait for you, and every decision is in the hash-chained audit log.</p>
+  </div>
+  <div id="error"></div>
 
   <!-- Orange when the notary has fewer than NOTARY_LOW_ANCHORS anchors left, red when it has none. -->
   <div id="notary-banner" class="banner" hidden>
     <span id="notary-banner-text"></span>
-    <button class="primary" data-notary-topup>Top up notary from BSV Desktop</button>
+    <button class="money small" data-notary-topup>Top up notary from BSV Desktop</button>
   </div>
 
-  <h2>Agents <label class="toggle"><input id="show-deleted" type="checkbox"> show deleted</label></h2>
-  <div class="table"><table>
-    <thead><tr><th>Agent</th><th>Connection</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
-    <tbody id="agents"><tr><td colspan="6" class="muted">Enter the admin token.</td></tr></tbody>
-  </table></div>
+  <div class="tiles" aria-live="polite">
+    <div id="tile-spent" class="tile amber"><div class="tile-label">Spent today</div><div id="tile-spent-value" class="tile-value">—</div><div id="tile-spent-sub" class="tile-sub">sats paid since 00:00 UTC</div></div>
+    <div id="tile-pending" class="tile amber"><div class="tile-label">Pending approvals</div><div id="tile-pending-value" class="tile-value">—</div><div id="tile-pending-sub" class="tile-sub">waiting for your decision</div></div>
+    <div id="tile-vaults" class="tile blue"><div class="tile-label">Open vaults</div><div id="tile-vaults-value" class="tile-value">—</div><div id="tile-vaults-sub" class="tile-sub">funded agent vaults</div></div>
+    <div id="tile-audit" class="tile green"><div class="tile-label">Audit chain</div><div id="tile-audit-value" class="tile-value">—</div><div id="tile-audit-sub" class="tile-sub">hash chain, anchored on BSV</div></div>
+  </div>
+
+  <section class="card accent-amber section">
+    <div class="card-head"><h2>Pending approvals <span id="pending-count" class="count">0</span></h2></div>
+    <div class="table stack"><table>
+      <thead><tr><th>Request</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Price</th><th>Created</th><th></th></tr></thead>
+      <tbody id="pending"><tr><td colspan="7" class="empty">Enter the admin token above to load the payments waiting for you.</td></tr></tbody>
+    </table></div>
+  </section>
 
   <!-- The one-time connection code is shown here, never stored, and removed from the page on Close. -->
-  <div id="code-box" class="card" hidden>
-    <div><strong>Connection code for <span id="code-agent"></span></strong></div>
+  <section id="code-box" class="card section" hidden>
+    <div class="card-head"><h2>Connection code for <span id="code-agent"></span></h2></div>
     <div id="code-value" class="code-big"></div>
     <div id="code-countdown" class="muted"></div>
     <div class="actions">
@@ -103,14 +324,25 @@
       <button id="code-copy" class="primary">Copy</button>
       <button id="code-close">Close</button>
     </div>
-    <p class="hint muted">Next step: on the agent's own machine, in the agent's project folder, run this command (a checkout of this project, <code>npm install</code> once). It
+    <p class="hint">Next step: on the agent's own machine, in the agent's project folder, run this command (a checkout of this project, <code>npm install</code> once). It
       connects the agent, creates its signing key, runs the agent service, sets up Claude Code and prints <code>Agent key fingerprint: XXXX-XXXX-XXXX</code>. Then fund the agent's vault on
       <a href="vault.html">vault.html</a>, after checking that the fingerprint shown there is the same. The code works once.</p>
-  </div>
+  </section>
 
-  <div id="rules-box" class="card" hidden>
-    <div><strong>Rules for <span id="rules-agent"></span></strong></div>
-    <form id="rules-form" class="grid" style="margin-top:12px">
+  <section class="card section">
+    <div class="card-head">
+      <h2>Agents <span id="agents-count" class="count">0</span></h2>
+      <label class="toggle"><input id="show-deleted" type="checkbox"> show deleted</label>
+    </div>
+    <div class="table wide"><table>
+      <thead><tr><th>Agent</th><th>Connection</th><th>Key fingerprint</th><th>Rules</th><th>Vault</th><th></th></tr></thead>
+      <tbody id="agents"><tr><td colspan="6" class="empty">Enter the admin token above to load your agents.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section id="rules-box" class="card accent-blue section" hidden>
+    <div class="card-head"><h2>Rules for <span id="rules-agent"></span></h2></div>
+    <form id="rules-form" class="grid">
       <label>Allowed hosts (comma-separated) <input name="allowedHosts" placeholder="api.example.com, localhost:5080"></label>
       <label>Currency <select name="currency"><option value="SAT">sats</option><option value="EUR">euros (€)</option></select></label>
       <label>Max per payment (<span data-unit>sats</span>) <input name="maxPerPayment" type="number" min="0" step="1" required></label>
@@ -121,11 +353,11 @@
       <button id="rules-save" class="primary">Save rules</button>
       <button id="rules-cancel">Cancel</button>
     </div>
-  </div>
+  </section>
 
-  <div class="card">
-    <div><strong>New agent</strong></div>
-    <form id="new-agent" class="grid" style="margin-top:12px">
+  <section class="card section">
+    <div class="card-head"><h2>New agent</h2></div>
+    <form id="new-agent" class="grid">
       <label>Name <input name="name" required maxlength="100" placeholder="travel-bot"></label>
       <label>Allowed hosts (comma-separated) <input name="allowedHosts" placeholder="api.example.com, localhost:5080"></label>
       <label>Currency <select name="currency"><option value="SAT">sats</option><option value="EUR">euros (€)</option></select></label>
@@ -135,59 +367,55 @@
     </form>
     <div class="actions">
       <button id="create" class="primary">Create agent</button>
-      <span class="muted hint">Payments above the threshold need your approval: you fund each one from your wallet. Euro limits are checked at the BSV/EUR rate at payment time; payments stay in sats.</span>
+      <span class="hint">Payments above the threshold need your approval: you fund each one from your wallet. Euro limits are checked at the BSV/EUR rate at payment time; payments stay in sats.</span>
     </div>
-  </div>
+  </section>
 
-  <h2>Pending approvals</h2>
-  <div class="table"><table>
-    <thead><tr><th>Request</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th>Created</th><th></th></tr></thead>
-    <tbody id="pending"><tr><td colspan="7" class="muted">Enter the admin token.</td></tr></tbody>
-  </table></div>
+  <section class="card section">
+    <div class="card-head"><h2>Ledger</h2><span id="total" class="muted"></span></div>
+    <div class="table wide"><table>
+      <thead><tr><th>Paid</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th class="num">€ at payment</th><th>Status</th><th>Transaction</th></tr></thead>
+      <tbody id="ledger"><tr><td colspan="8" class="empty">Enter the admin token above to load the ledger.</td></tr></tbody>
+    </table></div>
+  </section>
 
-  <h2>Ledger <span id="total" class="muted"></span></h2>
-  <div id="rate" class="muted hint"></div>
-  <div class="table"><table>
-    <thead><tr><th>Paid</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th class="num">€ at payment</th><th>Status</th><th>Transaction</th></tr></thead>
-    <tbody id="ledger"></tbody>
-  </table></div>
+  <section class="card section">
+    <div class="card-head"><h2>Audit log</h2></div>
+    <p class="hint" style="margin:-6px 0 14px">Every decision and payment, hash-chained: changing any past entry breaks the chain. Anchoring writes the
+      current head hash on BSV from your wallet, so even a rewritten chain is caught.</p>
+    <div id="audit-alert" hidden></div>
+    <div class="actions" style="margin:0 0 14px">
+      <span id="audit-status" class="muted">Enter the admin token above.</span>
+      <span id="audit-unanchored" class="unanchored"></span>
+      <span class="spacer"></span>
+      <button id="verify-full" class="small">Verify full chain</button>
+      <button id="anchor" class="money small" disabled>Anchor now with BSV Desktop</button>
+    </div>
+    <div id="audit-msg" class="muted" style="margin:-6px 0 12px"></div>
+    <div class="table wide"><table>
+      <thead><tr><th class="num">#</th><th>Time</th><th>Actor</th><th>Event</th><th>Details</th></tr></thead>
+      <tbody id="audit"><tr><td colspan="5" class="empty">Enter the admin token above to load the audit log.</td></tr></tbody>
+    </table></div>
+    <div class="subhead"><h3>Anchors on BSV</h3><span class="hint">Each vault payment carries one, the notary adds one when the log is idle, and you can anchor any time.</span></div>
+    <div class="table"><table>
+      <thead><tr><th class="num">#</th><th>Head hash</th><th>Source</th><th>Transaction</th><th>Still matches the log</th></tr></thead>
+      <tbody id="anchors"><tr><td colspan="5" class="empty">No anchors yet. Payments, the notary and the Anchor button write the log head on BSV.</td></tr></tbody>
+    </table></div>
+  </section>
 
-  <h2>Audit log</h2>
-  <div class="muted hint">Every decision and payment, hash-chained: changing any past entry breaks the chain. Anchoring writes the
-    current head hash on BSV from your wallet, so even a rewritten chain is caught.</div>
-  <div id="audit-alert" hidden></div>
-  <div class="actions">
-    <span id="audit-status" class="muted">Enter the admin token.</span>
-    <span id="audit-unanchored" class="unanchored"></span>
-    <button id="anchor" class="primary" disabled>Anchor now with BSV Desktop</button>
-    <button id="verify-full">Verify full chain</button>
-    <span id="audit-msg" class="muted"></span>
-  </div>
-  <div class="table" style="margin-top:12px"><table>
-    <thead><tr><th class="num">#</th><th>Time</th><th>Actor</th><th>Event</th><th>Details</th></tr></thead>
-    <tbody id="audit"></tbody>
-  </table></div>
-  <h2 style="font-size:13px">Anchors on BSV</h2>
-  <div class="muted hint">Anchors come from three places: each vault payment carries one, the notary adds one when the log has
-    been idle, and you can anchor any time with the button above.</div>
-  <div class="table" style="margin-top:8px"><table>
-    <thead><tr><th class="num">#</th><th>Head hash</th><th>By</th><th>Transaction</th><th>Still matches the log</th></tr></thead>
-    <tbody id="anchors"><tr><td colspan="5" class="muted">None yet.</td></tr></tbody>
-  </table></div>
-
-  <h2 style="font-size:13px">Notary</h2>
-  <div class="card">
-    <div id="notary-status" class="muted">Enter the admin token.</div>
-    <p class="hint muted">The notary is the operator's own small fee wallet. When entries are left unanchored and nothing has happened
+  <section class="card section">
+    <div class="card-head"><h2>Notary</h2></div>
+    <div id="notary-status" class="muted">Enter the admin token above.</div>
+    <p class="hint">The notary is the operator's own small fee wallet. When entries are left unanchored and nothing has happened
       for <span id="notary-idle">2 minutes</span>, it anchors the log head itself, so every event ends up on BSV even without payments.
       <strong>A top-up pays anchoring fees only</strong>: the notary can write audit anchors and nothing else. It holds no vault key and
       never touches company or agent funds, and it never holds more than <span id="notary-max">1000000</span> sats.</p>
     <div id="notary-actions" class="actions" hidden>
       <label>Amount (sats) <input id="notary-amount" type="number" min="1" step="1"></label>
-      <button class="primary" data-notary-topup>Top up notary from BSV Desktop</button>
+      <button class="money" data-notary-topup>Top up notary from BSV Desktop</button>
       <span id="notary-msg" class="muted"></span>
     </div>
-  </div>
+  </section>
 </main>
 <script type="module">
   // Built by `npm run build:web` from src/shared/fingerprint.ts (the agent and vault.html use the same function).
@@ -205,8 +433,18 @@
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
   const time = v => v ? new Date(v).toLocaleString() : ''
   const fpOf = pub => { if (!pub) return ''; try { return fingerprint(pub) } catch { return '?' } }
-  const VAULT_STATUS = { no_key: 'agent key not registered', awaiting_funding: 'awaiting funding', open: 'open', closed: 'closed' }
-  const AGENT_STATUS = { disabled: '<span class="agent-disabled">disabled</span>', deleted: '<span class="agent-deleted">deleted</span>' }
+  const sats = n => Number(n ?? 0).toLocaleString('en-US')
+  /** 413d699d…a9db40 */
+  const shortTx = txid => txid.length > 16 ? `${txid.slice(0, 8)}…${txid.slice(-6)}` : txid
+  const VAULT_STATUS = { no_key: 'key not registered', awaiting_funding: 'awaiting funding', open: 'open', closed: 'closed' }
+  const AGENT_STATUS = { active: '<span class="pill green">active</span>', disabled: '<span class="pill amber agent-disabled">disabled</span>', deleted: '<span class="pill agent-deleted">deleted</span>' }
+  const STATUS_PILL = { paid: 'green', paid_not_delivered: 'amber', denied: 'red', failed: 'red', expired: '' }
+  const statusPill = s => `<span class="pill ${STATUS_PILL[s] ?? ''} status-${esc(s)}">${esc(String(s).replaceAll('_', ' '))}</span>`
+  const empty = (cols, text) => `<tr><td colspan="${cols}" class="empty">${esc(text)}</td></tr>`
+  /** Writes only when the markup changed, so the 5 s refresh does not redraw (or move) anything that stayed the same. */
+  const shown = new Map()
+  const setHTML = (id, html) => { if (shown.get(id) !== html) { shown.set(id, html); $(id).innerHTML = html } }
+  const setText = (id, text) => { if ($(id).textContent !== text) $(id).textContent = text }
 
   async function api (path, init = {}) {
     const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${store.get()}`, ...(init.headers || {}) } })
@@ -232,27 +470,46 @@
   }
   for (const id of ['rules-form', 'new-agent']) $(id).elements.currency.addEventListener('change', () => { showCurrency($(id)) })
 
+  /** The token field folds away once a token is set; "change" opens it again. */
+  function showTokenState () {
+    const set = store.get() !== ''
+    $('token-form').hidden = set
+    $('token-set').hidden = !set
+  }
+
   let agents = []
   let anchoring = false
   let toppingUp = false
-  const SOURCE = { company: 'you (BSV Desktop)', payment: 'payment', notary: 'notary' }
+  const SOURCE = { company: ['manual', 'blue'], payment: ['payment', 'amber'], notary: ['notary', 'green'] }
 
   /** key=value pairs of an audit entry's data, for the table (escaped by the caller). */
   const details = data => Object.entries(data ?? {})
     .map(([k, v]) => `${k}=${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`).join(' · ').slice(0, 220)
 
+  /** One summary tile: its value, the line under it and whether it calls for attention. */
+  function tile (id, value, sub, alert = false, color) {
+    setText(`${id}-value`, value)
+    setText(`${id}-sub`, sub)
+    $(id).classList.toggle('alert', alert)
+    if (color !== undefined) $(id).className = `tile ${color}${alert ? ' alert' : ''}`
+  }
+
   /** Chain status line. The periodic refresh verifies incrementally; "Verify full chain" re-checks everything. */
   function renderCheck (check) {
     const lastAnchor = check.anchors.at(-1)
     const scope = check.mode === 'full' ? 'full check' : `checked through #${check.verifiedThrough}`
-    $('audit-status').className = check.ok ? 'chain-ok' : 'chain-bad'
-    $('audit-status').textContent = check.ok
+    let ok = check.ok
+    let text = check.ok
       ? `Chain valid (${scope}) · ${check.entries} entries${lastAnchor ? ` · last anchored at #${lastAnchor.seq}` : ' · not anchored yet'}`
       : `Chain BROKEN at #${check.brokenAt}: ${check.reason}`
     if (check.ok && check.anchors.some(a => !a.matches)) {
-      $('audit-status').className = 'chain-bad'
-      $('audit-status').textContent = `Chain rewritten: anchor #${check.anchors.find(a => !a.matches).seq} no longer matches the log`
+      ok = false
+      text = `Chain rewritten: anchor #${check.anchors.find(a => !a.matches).seq} no longer matches the log`
     }
+    $('audit-status').className = ok ? 'chain-ok' : 'chain-bad'
+    setText('audit-status', text)
+    tile('tile-audit', ok ? 'Valid' : 'Broken',
+      ok ? `${check.entries} entries · ${lastAnchor ? `anchored at #${lastAnchor.seq}` : 'not anchored yet'}` : text, !ok, ok ? 'green' : 'red')
   }
 
   function renderAudit ({ entries, anchors }, check, head) {
@@ -262,23 +519,26 @@
     $('audit-alert').textContent = head.chainShorterThanAnchor
       ? `Alert: the log ends at #${head.seq}, but an anchor on BSV covers #${head.latestAnchorSeq}. Its newest entries were deleted.`
       : ''
-    $('audit-unanchored').textContent = head.unanchoredEntries > 0
+    setText('audit-unanchored', head.unanchoredEntries > 0
       ? `${head.unanchoredEntries} ${head.unanchoredEntries === 1 ? 'entry' : 'entries'} not anchored yet`
-      : ''
+      : '')
     // Stays disabled while an anchor is in progress, whatever the periodic refresh finds.
     $('anchor').disabled = anchoring || check.entries === 0
-    $('audit').innerHTML = entries.length === 0
-      ? '<tr><td colspan="5" class="muted">No entries yet.</td></tr>'
+    setHTML('audit', entries.length === 0
+      ? empty(5, 'No entries yet. Every decision and payment will be logged here, hash-chained.')
       : entries.slice().reverse().map(e => `<tr>
-          <td class="num mono">${esc(e.seq)}</td><td>${esc(time(e.at))}</td><td class="mono">${esc(e.actor)}</td>
-          <td class="mono">${esc(e.type)}</td><td class="details mono">${esc(details(e.data))}</td></tr>`).join('')
+          <td class="num">${esc(e.seq)}</td><td class="secondary">${esc(time(e.at))}</td><td class="mono">${esc(e.actor)}</td>
+          <td class="mono">${esc(e.type)}</td><td class="details mono">${esc(details(e.data))}</td></tr>`).join(''))
     const matches = new Map(check.anchors.map(a => [a.txid, a.matches]))
-    $('anchors').innerHTML = anchors.length === 0
-      ? '<tr><td colspan="5" class="muted">None yet.</td></tr>'
-      : anchors.slice().reverse().map(a => `<tr>
-          <td class="num mono">${esc(a.seq)}</td><td class="mono">${esc(a.hash.slice(0, 16))}…</td><td>${esc(SOURCE[a.source] ?? a.source)}</td>
-          <td class="mono"><a href="${esc(a.explorerUrl)}" target="_blank" rel="noopener">${esc(a.txid.slice(0, 16))}…</a></td>
-          <td class="${matches.get(a.txid) ? 'chain-ok' : 'chain-bad'}">${matches.get(a.txid) ? 'yes' : 'NO'}</td></tr>`).join('')
+    setHTML('anchors', anchors.length === 0
+      ? empty(5, 'No anchors yet. Payments, the notary and the Anchor button write the log head on BSV.')
+      : anchors.slice().reverse().map(a => {
+        const [label, color] = SOURCE[a.source] ?? [a.source, '']
+        return `<tr>
+          <td class="num">${esc(a.seq)}</td><td class="mono">${esc(a.hash.slice(0, 16))}…</td><td><span class="pill plain ${color}">${esc(label)}</span></td>
+          <td class="mono"><a href="${esc(a.explorerUrl)}" target="_blank" rel="noopener">${esc(shortTx(a.txid))}</a></td>
+          <td>${matches.get(a.txid) ? '<span class="pill green chain-ok">yes</span>' : '<span class="pill red chain-bad">NO</span>'}</td></tr>`
+      }).join(''))
   }
 
   /** Notary balance and the low-balance banner (orange: few anchors left, red: none). */
@@ -287,17 +547,17 @@
     if (!n.enabled) {
       $('notary-banner').hidden = true
       $('notary-status').className = 'muted'
-      $('notary-status').textContent = `Notary disabled: ${n.reason}. Payments and the Anchor button still anchor the log.`
+      setText('notary-status', `Notary disabled: ${n.reason}. Payments and the Anchor button still anchor the log.`)
       return
     }
     $('notary-status').className = `notary-${n.level}`
-    $('notary-status').textContent = `${n.balanceSats} sats · about ${n.anchorsLeft} anchors left at ~${n.avgAnchorCostSats} sats each` +
-      (n.outOfFunds ? ' · out of funds: idle anchoring paused' : '') + (n.lastError ? ` · last error: ${n.lastError}` : '')
-    $('notary-idle').textContent = n.idleMs >= 60_000 ? `${Math.round(n.idleMs / 60_000)} minutes` : `${Math.round(n.idleMs / 1000)} seconds`
-    $('notary-max').textContent = n.maxSats
+    setText('notary-status', `${sats(n.balanceSats)} sats · about ${n.anchorsLeft} anchors left at ~${n.avgAnchorCostSats} sats each` +
+      (n.outOfFunds ? ' · out of funds: idle anchoring paused' : '') + (n.lastError ? ` · last error: ${n.lastError}` : ''))
+    setText('notary-idle', n.idleMs >= 60_000 ? `${Math.round(n.idleMs / 60_000)} minutes` : `${Math.round(n.idleMs / 1000)} seconds`)
+    setText('notary-max', String(n.maxSats))
     $('notary-banner').hidden = n.banner === null
     $('notary-banner').className = n.level === 'empty' ? 'banner empty' : 'banner'
-    $('notary-banner-text').textContent = n.banner ?? ''
+    setText('notary-banner-text', n.banner ?? '')
     const amount = $('notary-amount')
     amount.max = String(n.topUpRoomSats)
     if (amount.value === '') amount.value = String(Math.min(n.topUpRoomSats, 5000))
@@ -308,25 +568,37 @@
   function agentActions (a) {
     const id = esc(a.id)
     if (a.status === 'deleted') return ''
-    const del = `<button class="deny" data-agent-action="delete" data-id="${id}">Delete</button>`
+    const del = `<button class="deny small" data-agent-action="delete" data-id="${id}">Delete</button>`
     if (a.status === 'disabled') {
-      return `<button data-edit="${id}">Edit rules</button><button class="approve" data-agent-action="enable" data-id="${id}">Enable</button>${del}`
+      return `<button class="small" data-edit="${id}">Edit rules</button><button class="primary small" data-agent-action="enable" data-id="${id}">Enable</button>${del}`
     }
-    return `<button data-edit="${id}">Edit rules</button><button data-code="${id}">New code</button>` +
-      `<button class="deny" data-agent-action="disable" data-id="${id}">Disable</button>${del}`
+    return `<button class="small" data-edit="${id}">Edit rules</button><button class="small" data-code="${id}">New code</button>` +
+      `<button class="deny small" data-agent-action="disable" data-id="${id}">Disable</button>${del}`
+  }
+
+  /** The vault cell: balance, and a v1/v2 badge (v2 with the caps every node enforces). */
+  function vaultCell (v) {
+    if (v.status !== 'open') return `<span class="muted">${esc(VAULT_STATUS[v.status] ?? v.status)}</span>`
+    const badge = v.covenant == null
+      ? '<span class="badge" title="v1: agent + policy, or the company alone">v1</span>'
+      : `<span class="badge amber" title="v2 covenant: every node enforces these caps; change goes back to the vault">v2 · ≤ ${esc(sats(v.covenant.maxSats))} sats · fee ≤ ${esc(sats(v.covenant.maxFeeSats))}</span>`
+    return `<span class="vault-sats">${esc(sats(v.satoshis))} sats</span><span class="sub">${badge}</span>`
   }
 
   function renderAgents () {
-    $('agents').innerHTML = agents.length === 0
-      ? '<tr><td colspan="6" class="muted">No agents yet: create one below.</td></tr>'
+    setText('agents-count', String(agents.filter(a => a.status !== 'deleted').length))
+    setHTML('agents', agents.length === 0
+      ? empty(6, 'No agents yet. Create your first one below to get its connection link.')
       : agents.map(a => `<tr class="${a.status === 'deleted' ? 'deleted' : ''}">
-          <td>${esc(a.name)}<br><span class="mono muted">${esc(a.id)}</span>${AGENT_STATUS[a.status] ? `<br>${AGENT_STATUS[a.status]}` : ''}</td>
+          <td class="nowrap"><span class="agent-name">${esc(a.name)}</span><span class="sub mono">${esc(a.id)}</span><span class="sub">${AGENT_STATUS[a.status] ?? esc(a.status)}</span></td>
           <td>${a.status !== 'active' ? '<span class="muted">key revoked</span>' : a.connected ? `<span class="mono">${esc(a.key)}</span>` : '<span class="muted">not connected</span>'}</td>
           <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
           <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
             ${esc(rulesSummary(a.rules))}</td>
-          <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}${a.vault.covenant == null || a.vault.status !== 'open' ? '' : `<br><span class="muted hint">v2 covenant: max ${esc(a.vault.covenant.maxSats)} sats per payment, fee at most ${esc(a.vault.covenant.maxFeeSats)} sats, change locked to the vault</span>`}</td>
-          <td class="agent-actions">${agentActions(a)}</td></tr>`).join('')
+          <td>${vaultCell(a.vault)}</td>
+          <td class="agent-actions">${agentActions(a)}</td></tr>`).join(''))
+    const open = agents.filter(a => a.status !== 'deleted' && a.vault.status === 'open')
+    tile('tile-vaults', String(open.length), open.length === 0 ? 'no vault funded yet' : `${sats(open.reduce((s, a) => s + a.vault.satoshis, 0))} sats locked`)
   }
 
   async function refresh () {
@@ -337,31 +609,41 @@
         api('/admin/audit/verify'), api('/admin/audit/head')
       ])
       // Own catches: an older proxy without /admin/notary or /admin/rate must not break the rest of the page.
-      api('/admin/rate').then(r => { $('rate').textContent = rateLine(r) }).catch(err => { $('rate').textContent = `BSV/EUR rate: ${err.message}` })
-      api('/admin/notary').then(renderNotary).catch(err => { $('notary-status').textContent = `Notary: ${err.message}` })
+      api('/admin/rate').then(r => { $('rate').hidden = false; setText('rate', rateLine(r)); $('rate').title = rateLine(r) }).catch(() => { $('rate').hidden = true })
+      api('/admin/notary').then(renderNotary).catch(err => { setText('notary-status', `Notary: ${err.message}`) })
       agents = list
       renderAgents()
       renderAudit(audit, check, head)
-      $('error').textContent = ''
-      $('pending').innerHTML = requests.length === 0
-        ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
+      setText('error', '')
+      setText('network', ledger.network === 'test' ? 'testnet' : 'mainnet')
+      setText('pending-count', String(requests.length))
+      setHTML('pending', requests.length === 0
+        ? empty(7, 'Nothing to approve. Payments above an agent\'s threshold wait here for you.')
         : requests.map(r => `<tr>
-            <td class="mono">${esc(r.requestId)}</td><td>${esc(r.agentName)}</td><td>${esc(r.purpose)}</td>
-            <td class="url mono">${esc(r.method)} ${esc(r.url)}</td><td class="num">${esc(r.satoshis)}${r.eurCents === undefined ? '' : `<br><span class="muted">${esc(formatEur(r.eurCents))}</span>`}</td><td>${esc(time(r.createdAt))}</td>
-            <td><a class="approve" href="vault.html?approve=${encodeURIComponent(r.requestId)}" title="Approving means funding this payment from your wallet">Approve and fund</a>
-                <button class="deny" data-id="${esc(r.requestId)}" data-action="deny">Deny</button></td></tr>`).join('')
-      $('total').textContent = `· ${ledger.totalSats} sats on ${ledger.network === 'test' ? 'testnet' : 'mainnet'}` +
-        (ledger.totalEurCents > 0 ? ` (${formatEur(ledger.totalEurCents)} at payment time, where a rate was recorded)` : '')
-      $('ledger').innerHTML = ledger.entries.length === 0
-        ? '<tr><td colspan="8" class="muted">No payments yet.</td></tr>'
+            <td class="mono">${esc(r.requestId)}</td><td class="nowrap">${esc(r.agentName)}</td><td>${esc(r.purpose)}</td>
+            <td class="url mono">${esc(r.method)} ${esc(r.url)}</td><td class="num"><span class="pending-price">${esc(sats(r.satoshis))}</span> sats${r.eurCents === undefined ? '' : `<span class="sub">${esc(formatEur(r.eurCents))}</span>`}</td><td class="secondary">${esc(time(r.createdAt))}</td>
+            <td class="pending-actions"><a class="approve small" href="vault.html?approve=${encodeURIComponent(r.requestId)}" title="Approving means funding this payment from your wallet">Approve and fund</a>
+                <button class="deny small" data-id="${esc(r.requestId)}" data-action="deny">Deny</button></td></tr>`).join(''))
+      const waiting = requests.reduce((s, r) => s + (r.satoshis ?? 0), 0)
+      tile('tile-pending', String(requests.length), requests.length === 0 ? 'nothing waiting' : `${sats(waiting)} sats waiting for you`, requests.length > 0)
+      // Budgets reset at 00:00 UTC, so "today" is the UTC day here too.
+      const dayStart = new Date().setUTCHours(0, 0, 0, 0)
+      const today = ledger.entries.filter(e => e.paidAt && Date.parse(e.paidAt) >= dayStart)
+      const todayEur = today.reduce((s, e) => s + (e.eurCents ?? 0), 0)
+      tile('tile-spent', sats(today.reduce((s, e) => s + (e.satoshis ?? 0), 0)),
+        `sats · ${today.length} ${today.length === 1 ? 'payment' : 'payments'} today (UTC)${todayEur > 0 ? ` · ${formatEur(todayEur)}` : ''}`)
+      setText('total', `${sats(ledger.totalSats)} sats in total` +
+        (ledger.totalEurCents > 0 ? ` · ${formatEur(ledger.totalEurCents)} at payment time, where a rate was recorded` : ''))
+      setHTML('ledger', ledger.entries.length === 0
+        ? empty(8, 'No payments yet. Every payment an agent makes shows up here with its transaction.')
         : ledger.entries.map(e => `<tr>
-            <td>${esc(time(e.paidAt))}</td><td>${esc(e.agentName)}</td><td>${esc(e.purpose)}</td>
-            <td class="url mono">${esc(e.method)} ${esc(e.url)}</td><td class="num">${esc(e.satoshis)}</td>
+            <td class="secondary">${esc(time(e.paidAt))}</td><td class="nowrap">${esc(e.agentName)}</td><td>${esc(e.purpose)}</td>
+            <td class="url mono">${esc(e.method)} ${esc(e.url)}</td><td class="num">${esc(sats(e.satoshis))}</td>
             <td class="num"${e.eurRate === undefined ? '' : ` title="1 BSV = ${esc(e.eurRate)} € (${esc(e.rateSource)})"`}>${e.eurCents === undefined ? '' : esc(formatEur(e.eurCents))}</td>
-            <td class="status-${esc(e.status)}">${esc(e.status.replaceAll('_', ' '))}</td>
-            <td class="mono">${e.explorerUrl ? `<a href="${esc(e.explorerUrl)}" target="_blank" rel="noopener">${esc(e.txid.slice(0, 12))}…</a>` : ''}</td></tr>`).join('')
+            <td>${statusPill(e.status)}</td>
+            <td class="mono">${e.explorerUrl ? `<a href="${esc(e.explorerUrl)}" target="_blank" rel="noopener" title="${esc(e.txid)}">${esc(shortTx(e.txid))}</a>` : ''}</td></tr>`).join(''))
     } catch (err) {
-      $('error').textContent = err.message
+      setText('error', err.message)
     }
   }
 
@@ -547,7 +829,7 @@
     try {
       const { anchorNow } = await import('./audit.js')
       const r = await anchorNow(location.origin, store.get())
-      $('audit-msg').textContent = `Anchored #${r.seq} in ${r.txid.slice(0, 16)}…`
+      $('audit-msg').textContent = `Anchored #${r.seq} in ${shortTx(r.txid)}`
     } catch (err) {
       $('audit-msg').className = 'failed'
       $('audit-msg').textContent = `Not anchored: ${err.message}`
@@ -602,8 +884,10 @@
   })
 
   $('show-deleted').addEventListener('change', () => { refresh() })
-  $('save').addEventListener('click', () => { store.set($('token').value.trim()); $('token').value = ''; refresh() })
+  $('save').addEventListener('click', () => { store.set($('token').value.trim()); $('token').value = ''; showTokenState(); refresh() })
   $('token').addEventListener('keydown', ev => { if (ev.key === 'Enter') $('save').click() })
+  $('token-change').addEventListener('click', () => { $('token-set').hidden = true; $('token-form').hidden = false; $('token').focus() })
+  showTokenState()
   refresh()
   setInterval(refresh, 5000)
 </script>

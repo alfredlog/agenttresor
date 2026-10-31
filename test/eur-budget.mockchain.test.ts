@@ -182,10 +182,10 @@ describe('the agent tools', () => {
     const tools = createAgentTools({ client: new ProxyClient({ proxyUrl: h.url, apiKey: created.apiKey }) })
     setRate(10_000)
     const budget = await tools.checkBudget()
-    expect(budget.summary).toMatch(/^Budget in euros\. Remaining today: 1\.20 € of 1\.20 €\. About 12000 sats at 1 BSV = 10000 € \(test\)\./)
-    expect(budget.summary).toMatch(/above 0\.20 € need a human approval; above 0\.50 € they are refused/)
+    expect(budget.summary).toMatch(/^Budget in euros: 1\.20 € left today of 1\.20 € \(0\.00 € spent\); approval above 0\.20 €; max 0\.50 € per payment\. At 1 BSV = 10000\.00 € \(test\), that is about 12,000 sats left today\./)
+    expect(budget.summary).not.toMatch(/undefined|NaN/)
     const price = await tools.getPrice({ url: `${merchant}/api/report`, method: 'GET' })
-    expect(price.summary).toBe('The merchant asks 500 sats for this request. That is about 0.05 € at 1 BSV = 10000 € (test); your budget is in euros and the price is converted again at payment time.')
+    expect(price.summary).toBe('The merchant asks 500 sats for this request. That is about 0.05 € at 1 BSV = 10000.00 € (test). Your budget is in euros: max 0.50 € per payment, approval above 0.20 €, 1.20 € left today; the price is converted again at payment time.')
     expect(price.data).toMatchObject({ satoshis: 500, eurCents: 5, eurRate: 10_000 })
 
     setRate(undefined)

@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { covenantMaxSats, evaluate, parseRules, RATE_UNAVAILABLE, type Rules } from '../src/proxy/rules'
 import { cachedRateProvider, centsToSats, coingeckoQuote, COINGECKO_URL, freshQuote, MAX_RATE_AGE_MS, satsToCents, type RateQuote } from '../src/shared/rate'
+import { budgetSummary } from '../src/agent/tools'
 import { eurosToCents, formToRules, rateLine, rulesSummary, rulesToForm } from '../src/shared/rules-form'
 
 const NOW = Date.parse('2026-10-31T12:00:00Z')
@@ -174,5 +175,24 @@ describe('the dashboard\'s rules form', () => {
     expect(rateLine({ available: true, rate: 41.234, at: new Date(NOW).toISOString(), source: 'coingecko' })).toMatch(/^1 BSV = 41\.23 € \(coingecko, .+\)$/)
     expect(rateLine({ available: false })).toMatch(/unavailable/)
     expect(rateLine({ available: false, rate: 41, source: 'coingecko' })).toMatch(/too old/)
+  })
+})
+
+describe('check_budget text', () => {
+  const eurRules = { allowedHosts: [], currency: 'EUR', maxPerPaymentCents: 50, dailyBudgetCents: 50, approvalThresholdCents: 20 }
+  it('EUR rules: euro amounts only, never undefined or NaN', () => {
+    const full = budgetSummary({ rules: eurRules, spentTodayCents: 1, remainingTodayCents: 49, remainingTodaySats: 4_900, spentTodaySats: 100, rate: { rate: 10_000, source: 'test' }, vault: { satoshis: 20_000, status: 'open' } })
+    expect(full).toMatch(/^Budget in euros: 0\.49 € left today of 0\.50 € \(0\.01 € spent\); approval above 0\.20 €; max 0\.50 € per payment\./)
+    // Sparse answers (older proxy, no rate): still no "undefined" or "NaN", and no sat limits.
+    for (const b of [{ rules: eurRules, spentTodayCents: 1, rate: null, vault: { satoshis: 0, status: 'none' } }, { rules: eurRules }]) {
+      const text = budgetSummary(b)
+      expect(text).not.toMatch(/undefined|NaN/)
+      expect(text).toMatch(/approval above 0\.20 €; max 0\.50 € per payment/)
+    }
+    expect(budgetSummary({ rules: eurRules, spentTodayCents: 1 })).toMatch(/0\.49 € left today/)
+  })
+  it('SAT rules: unchanged', () => {
+    expect(budgetSummary({ rules: { allowedHosts: [], maxPerPaymentSats: 1_000, dailyBudgetSats: 5_000, approvalThresholdSats: 300 }, remainingTodaySats: 4_500, vault: { satoshis: 20_000, status: 'open' } }))
+      .toBe('Remaining today: 4500 of 5000 sats; vault: 20000 sats (open). Payments above 300 sats need a human approval; above 1000 sats they are refused.')
   })
 })

@@ -91,18 +91,58 @@ export interface AgentTools {
   checkRequest: (requestId: string) => Promise<ToolOutcome>
 }
 
+const isAmount = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+/** "0.50 €", or a plain word when the proxy did not send the amount (never "undefined" or "NaN"). */
+const euros = (cents: unknown): string => isAmount(cents) ? formatCents(cents) : 'an unknown amount'
+const satsText = (n: unknown): string => isAmount(n) ? `${n.toLocaleString('en-US')} sats` : 'an unknown number of sats'
+
+/** The proxy's BSV/EUR quote from a /v1/budget answer, if it is usable. */
+function quoteOf (b: any): { rate: number, source: string } | undefined {
+  const rate = b?.rate?.rate
+  return isAmount(rate) && rate > 0 ? { rate, source: typeof b.rate.source === 'string' ? b.rate.source : 'unknown source' } : undefined
+}
+const rateText = (q: { rate: number, source: string }): string => `1 BSV = ${q.rate.toFixed(2)} € (${q.source})`
+
+/**
+ * The check_budget sentence for a /v1/budget answer. EUR rules are phrased in
+ * euros only (their sat fields are never read); SAT rules as before.
+ */
+export function budgetSummary (b: any): string {
+  if (b?.rules?.currency !== 'EUR') {
+    return `Remaining today: ${b.remainingTodaySats} of ${b.rules.dailyBudgetSats} sats; vault: ${b.vault.satoshis} sats (${b.vault.status}). ` +
+      `Payments above ${b.rules.approvalThresholdSats} sats need a human approval; above ${b.rules.maxPerPaymentSats} sats they are refused.`
+  }
+  const r = b.rules
+  const spent = isAmount(b.spentTodayCents) ? b.spentTodayCents : undefined
+  const left = isAmount(b.remainingTodayCents)
+    ? b.remainingTodayCents
+    : isAmount(r.dailyBudgetCents) && spent !== undefined ? Math.max(0, r.dailyBudgetCents - spent) : undefined
+  const vault = b.vault == null ? '' : ` Vault: ${satsText(b.vault.satoshis)} (${String(b.vault.status ?? 'unknown')}).`
+  const q = quoteOf(b)
+  const rate = q === undefined
+    ? 'The exchange rate is unavailable right now, so every payment is refused until it is back.'
+    : `At ${rateText(q)}${isAmount(b.remainingTodaySats) ? `, that is about ${satsText(b.remainingTodaySats)} left today` : ''}.`
+  return `Budget in euros: ${euros(left)} left today of ${euros(r.dailyBudgetCents)}${spent === undefined ? '' : ` (${euros(spent)} spent)`}; ` +
+    `approval above ${euros(r.approvalThresholdCents)}; max ${euros(r.maxPerPaymentCents)} per payment. ${rate}${vault} ` +
+    'Prices are in sats, converted to euros at payment time and rounded up.'
+}
+
 /**
  * Under EUR rules, a price in euros at the proxy's current rate (rounded up, as
- * the proxy rounds it); undefined under SAT rules or when the proxy cannot say.
+ * the proxy rounds it), with the limits it is checked against; undefined under
+ * SAT rules or when the proxy cannot say.
  */
 async function euroPrice (client: ProxyClient | undefined, sats: number): Promise<{ text: string, data: Record<string, unknown> } | undefined> {
   const b = await client?.budget().then(res => res.status === 200 ? res.body : undefined, () => undefined)
   if (b?.rules?.currency !== 'EUR') return undefined
-  if (b.rate == null) return { text: 'Your budget is in euros and the exchange rate is unavailable right now: the payment would be refused.', data: { eurCents: null } }
-  const cents = satsToCents(sats, b.rate.rate)
+  const q = quoteOf(b)
+  if (q === undefined) return { text: 'Your budget is in euros and the exchange rate is unavailable right now: the payment would be refused.', data: { eurCents: null } }
+  const cents = satsToCents(sats, q.rate)
+  const limits = `Your budget is in euros: max ${euros(b.rules.maxPerPaymentCents)} per payment, approval above ${euros(b.rules.approvalThresholdCents)}` +
+    (isAmount(b.remainingTodayCents) ? `, ${euros(b.remainingTodayCents)} left today` : '')
   return {
-    text: `That is about ${formatCents(cents)} at 1 BSV = ${b.rate.rate} € (${b.rate.source}); your budget is in euros and the price is converted again at payment time.`,
-    data: { eurCents: cents, eurRate: b.rate.rate, rateSource: b.rate.source }
+    text: `That is about ${formatCents(cents)} at ${rateText(q)}. ${limits}; the price is converted again at payment time.`,
+    data: { eurCents: cents, eurRate: q.rate, rateSource: q.source }
   }
 }
 
@@ -154,17 +194,7 @@ export function createAgentTools (opts: AgentToolsOptions): AgentTools {
     checkBudget: async () => await safe(async () => {
       const res = await need(opts.client).budget()
       if (res.status !== 200) return proxyFailed(res.status, res.body)
-      const b = res.body
-      if (b.rules.currency === 'EUR') {
-        const rate = b.rate == null
-          ? 'The exchange rate is unavailable right now, so every payment is refused until it is back.'
-          : `About ${b.remainingTodaySats} sats at 1 BSV = ${b.rate.rate} € (${b.rate.source}).`
-        return outcome(`Budget in euros. Remaining today: ${formatCents(b.remainingTodayCents)} of ${formatCents(b.rules.dailyBudgetCents)}. ${rate} ` +
-          `Vault: ${b.vault.satoshis} sats (${b.vault.status}). Payments above ${formatCents(b.rules.approvalThresholdCents)} need a human approval; ` +
-          `above ${formatCents(b.rules.maxPerPaymentCents)} they are refused. Prices are in sats, converted to euros at payment time and rounded up.`, b)
-      }
-      return outcome(`Remaining today: ${b.remainingTodaySats} of ${b.rules.dailyBudgetSats} sats; vault: ${b.vault.satoshis} sats (${b.vault.status}). ` +
-        `Payments above ${b.rules.approvalThresholdSats} sats need a human approval; above ${b.rules.maxPerPaymentSats} sats they are refused.`, b)
+      return outcome(budgetSummary(res.body), res.body)
     }),
 
     getPrice: async ({ url, method, body }) => await safe(async () => {

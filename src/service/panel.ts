@@ -183,45 +183,250 @@ export function panelPage (csrf: string, nonce: string): string {
 <meta name="panel-token" content="${csrf}">
 <title>AgentTresor Agents</title>
 <style>
-  :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --card: #fff; --ok: #1f7a4d; --warn: #9a6200; --bad: #b3261e; --accent: #2b59c3; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --card: #1f1f1d; --ok: #5cc28f; --warn: #e0a84a; --bad: #f08a80; --accent: #8fb0ff; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
-  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 15px; margin: 28px 0 10px; }
-  .muted { color: var(--muted); }
-  .table { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-weight: 600; color: var(--muted); font-size: 12px; }
-  tr:last-child td { border-bottom: 0; }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
-  button { font: inherit; padding: 6px 12px; border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; background: var(--card); cursor: pointer; }
-  .active { color: var(--ok); font-weight: 700; }
-  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
-  ul.checks { list-style: none; padding: 0; margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
-  ul.checks li { padding: 8px 12px; border-bottom: 1px solid var(--line); }
-  ul.checks li:last-child { border-bottom: 0; }
-  .fix { font-size: 12px; margin-top: 2px; }
-  #error { color: var(--bad); }
+    /* ── AgentTresor design system (the same block in index.html, vault.html, connect.html and src/service/panel.ts) ── */
+    :root {
+      color-scheme: dark;
+      --bg: #0E1219; --panel: #171D29; --panel-2: #1F2736; --line: #2C3648;
+      --text: #F4F1EA; --text-2: #B9C3D3; --muted: #7C889B;
+      --amber: #F2B544; --blue: #6E9BFF; --green: #5FD08A; --red: #FF6B5E;
+      --amber-bg: rgba(242, 181, 68, .12); --blue-bg: rgba(110, 155, 255, .12); --green-bg: rgba(95, 208, 138, .12); --red-bg: rgba(255, 107, 94, .12);
+      --on-accent: #0E1219;
+      --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 8px 24px rgba(0, 0, 0, .25);
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --radius: 12px;
+      /* Older names, still used by some markup. */
+      --fg: var(--text); --card: var(--panel); --ok: var(--green); --warn: var(--amber); --bad: var(--red); --accent: var(--blue);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --bg: #F5F3EE; --panel: #FFFFFF; --panel-2: #F0EDE6; --line: #DCD7CC;
+        --text: #171C27; --text-2: #465165; --muted: #6E7787;
+        --amber: #A86F00; --blue: #2F5FD0; --green: #1C8447; --red: #C3362A;
+        --amber-bg: rgba(168, 111, 0, .10); --blue-bg: rgba(47, 95, 208, .09); --green-bg: rgba(28, 132, 71, .10); --red-bg: rgba(195, 54, 42, .09);
+        --on-accent: #FFFFFF;
+        --shadow: 0 1px 2px rgba(23, 28, 39, .06), 0 6px 18px rgba(23, 28, 39, .05);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); font-feature-settings: "cv11", "ss01"; -webkit-font-smoothing: antialiased; }
+    main { max-width: 1200px; margin: 0 auto; padding: 24px 24px 64px; }
+    h1, h2, h3 { margin: 0; letter-spacing: -.01em; }
+    h1 { font-size: 22px; font-weight: 700; }
+    h2 { font-size: 15px; font-weight: 650; }
+    p { margin: 8px 0 0; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: var(--mono); font-size: 12.5px; }
+    .num, .mono, .tabular { font-variant-numeric: tabular-nums; }
+    .muted { color: var(--muted); }
+    .secondary { color: var(--text-2); }
+    .hint { font-size: 13px; color: var(--text-2); }
+    [hidden] { display: none !important; }
+    :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 6px; }
+
+    /* Top bar */
+    .topbar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+    .topbar-inner { max-width: 1200px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 60px; }
+    .wordmark { display: inline-flex; align-items: center; gap: 10px; font-weight: 750; font-size: 17px; letter-spacing: -.02em; color: var(--text); }
+    .wordmark:hover { text-decoration: none; }
+    .wordmark .mark { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--amber), #E08A2E); display: grid; place-items: center; color: #0E1219; font-size: 14px; font-weight: 800; }
+    .topbar nav { display: flex; gap: 4px; margin-left: 8px; }
+    .topbar nav a { color: var(--text-2); padding: 6px 10px; border-radius: 8px; font-size: 13px; font-weight: 550; }
+    .topbar nav a:hover, .topbar nav a[aria-current="page"] { background: var(--panel-2); color: var(--text); text-decoration: none; }
+    .spacer { flex: 1; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text-2); font-size: 12.5px; white-space: nowrap; }
+    .chip .mono { font-size: 12px; color: var(--text); }
+
+    /* Pills and badges */
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 18px; white-space: nowrap; background: var(--panel-2); color: var(--text-2); }
+    .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .pill.green { background: var(--green-bg); color: var(--green); }
+    .pill.red { background: var(--red-bg); color: var(--red); }
+    .pill.amber { background: var(--amber-bg); color: var(--amber); }
+    .pill.blue { background: var(--blue-bg); color: var(--blue); }
+    .pill.plain::before { display: none; }
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; font: 600 11px/18px var(--mono); border: 1px solid var(--line); color: var(--text-2); white-space: nowrap; }
+    .badge.amber { border-color: color-mix(in srgb, var(--amber) 55%, transparent); color: var(--amber); background: var(--amber-bg); }
+    .badge.blue { border-color: color-mix(in srgb, var(--blue) 55%, transparent); color: var(--blue); background: var(--blue-bg); }
+
+    /* Cards and sections */
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
+    .section { margin-top: 20px; }
+    .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .card-head h2 { display: flex; align-items: center; gap: 8px; }
+    .card-head .count { font: 600 12px/20px var(--mono); padding: 0 8px; border-radius: 999px; background: var(--panel-2); color: var(--text-2); min-width: 26px; text-align: center; }
+    .card.accent-amber { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: linear-gradient(180deg, var(--amber-bg), transparent 140px), var(--panel); }
+    .card.accent-amber .card-head h2 { color: var(--amber); }
+    .card.accent-amber .count { background: var(--amber); color: var(--on-accent); }
+    .card.accent-blue { border-color: color-mix(in srgb, var(--blue) 40%, var(--line)); }
+    .card.accent-green { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+
+    /* Summary tiles: fixed heights, so the 5 s refresh never moves the layout */
+    .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
+    .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; min-height: 108px; display: flex; flex-direction: column; gap: 6px; box-shadow: var(--shadow); }
+    .tile-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; display: flex; align-items: center; gap: 8px; }
+    .tile-label::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--tile, var(--blue)); }
+    .tile-value { font: 650 28px/34px var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; color: var(--text); height: 34px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile-sub { font-size: 12.5px; color: var(--text-2); height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile.amber { --tile: var(--amber); } .tile.blue { --tile: var(--blue); } .tile.green { --tile: var(--green); } .tile.red { --tile: var(--red); }
+    .tile.alert { border-color: color-mix(in srgb, var(--tile) 55%, var(--line)); }
+    .tile.alert .tile-value { color: var(--tile); }
+
+    /* Tables */
+    .table { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .card .table { border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-size: 11px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; background: var(--panel-2); white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+    td.num, th.num { text-align: right; }
+    td.num { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td.empty, li.empty { text-align: center; color: var(--muted); padding: 28px 16px; font-size: 13.5px; }
+    .url { max-width: 300px; word-break: break-all; color: var(--text-2); }
+    .sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* Forms */
+    /* Flex, not grid: a label's text and its unit (<span data-unit>) stay on one line, the field wraps below. */
+    label { display: flex; flex-wrap: wrap; align-items: baseline; row-gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+    label > input, label > select { flex: 1 0 100%; }
+    label > input[type="checkbox"] { flex: none; }
+    input, select { font: inherit; font-size: 14px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); min-width: 0; width: 100%; transition: border-color .15s, box-shadow .15s; }
+    input::placeholder { color: var(--muted); }
+    /* The select follows the theme: no native light box, a drawn chevron, dark options. */
+    select { appearance: none; -webkit-appearance: none; padding-right: 34px; cursor: pointer; background-image: linear-gradient(45deg, transparent 50%, var(--text-2) 50%), linear-gradient(135deg, var(--text-2) 50%, transparent 50%); background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%; background-size: 5px 5px; background-repeat: no-repeat; }
+    select option { background: var(--panel-2); color: var(--text); }
+    input:focus, select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-bg); }
+    input[type="checkbox"] { width: 18px; height: 18px; padding: 0; accent-color: var(--green); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+    .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+    .check { display: flex; flex-direction: row; gap: 10px; align-items: center; font-size: 13.5px; font-weight: 550; color: var(--text); margin-top: 12px; cursor: pointer; }
+
+    /* Buttons */
+    button, a.button, a.approve { font: inherit; font-size: 13.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s, opacity .15s; text-decoration: none; }
+    button:hover:not(:disabled), a.button:hover, a.approve:hover { border-color: var(--text-2); text-decoration: none; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { background: var(--blue); border-color: var(--blue); color: var(--on-accent); }
+    button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--blue) 85%, white); border-color: transparent; }
+    button.money, a.approve, button.approve, button.ok { background: var(--amber); border-color: var(--amber); color: var(--on-accent); }
+    button.money:hover:not(:disabled), a.approve:hover, button.approve:hover:not(:disabled), button.ok:hover:not(:disabled) { background: color-mix(in srgb, var(--amber) 85%, white); border-color: transparent; }
+    button.deny { background: transparent; border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red); }
+    button.deny:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red); }
+    button.ghost { background: transparent; }
+    button.small, a.small { min-height: 30px; padding: 0 10px; font-size: 12.5px; }
+    /* Loading and success states (vault page): the label stays, a spinner or a check is added. */
+    button.loading { cursor: progress; opacity: .85 !important; }
+    button.loading::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; }
+    button.done { background: var(--green) !important; border-color: var(--green) !important; color: var(--on-accent) !important; }
+    button.done::before { content: "✓"; font-weight: 800; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { button.loading::before { animation-duration: 2.4s; } }
+
+    /* Keys, fingerprints, codes */
+    .fp { font-family: var(--mono); font-weight: 650; letter-spacing: .04em; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td.mono, .sub.mono, .nowrap { white-space: nowrap; }
+    td.url, td.details { white-space: normal; }
+    .fp-big { display: block; font: 700 clamp(26px, 6vw, 40px)/1.15 var(--mono); letter-spacing: .06em; color: var(--amber); margin: 10px 0 2px; word-break: break-all; }
+    .ok-text { color: var(--green); } .bad-text { color: var(--red); } .warn-text { color: var(--amber); }
+
+    /* Steps (vault page) */
+    .steps { display: grid; gap: 14px; counter-reset: step; }
+    .step { position: relative; padding-left: 58px; }
+    .step::before { counter-increment: step; content: counter(step); position: absolute; left: 20px; top: 20px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 700 13px/1 var(--mono); background: var(--panel-2); color: var(--text-2); border: 1px solid var(--line); }
+    .step.current::before { background: var(--blue); color: var(--on-accent); border-color: var(--blue); }
+    .step.complete::before { content: "✓"; background: var(--green); color: var(--on-accent); border-color: var(--green); }
+    .step h3 { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+
+    /* Timeline (vault page activity) */
+    .timeline { list-style: none; margin: 0; padding: 0 0 0 18px; position: relative; display: grid; gap: 12px; }
+    .timeline::before { content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 2px; background: var(--line); border-radius: 2px; }
+    .timeline li { position: relative; padding: 10px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; word-break: break-word; }
+    .timeline li::before { content: ""; position: absolute; left: -18px; top: 15px; width: 12px; height: 12px; border-radius: 50%; background: var(--panel); border: 2px solid var(--muted); }
+    .timeline li.ok::before { border-color: var(--green); background: var(--green); }
+    .timeline li.error { border-color: color-mix(in srgb, var(--red) 50%, var(--line)); color: var(--red); }
+    .timeline li.error::before { border-color: var(--red); background: var(--red); }
+    .timeline li.info::before { border-color: var(--blue); }
+    .timeline .time { display: block; font: 12px var(--mono); color: var(--muted); margin-bottom: 2px; }
+    .timeline li.empty { background: transparent; border-style: dashed; }
+    .timeline li.empty::before { display: none; }
+
+    /* Checklist (local panel) */
+    .checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .checklist li { display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .checklist .icon { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 12px; color: var(--on-accent); background: var(--muted); }
+    .checklist li.ok .icon { background: var(--green); }
+    .checklist li.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+    .checklist li.bad .icon { background: var(--red); }
+    .checklist .name { font-weight: 650; }
+    .checklist .fix { margin-top: 6px; font-size: 13px; color: var(--text-2); }
+    .checklist .fix code { color: var(--amber); }
+
+    @media (max-width: 900px) {
+      .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      main { padding: 16px 14px 48px; }
+      .topbar-inner { padding: 10px 14px; gap: 8px; }
+      .topbar nav { margin-left: 0; order: 3; width: 100%; }
+      .card { padding: 16px; }
+      .tiles { gap: 10px; }
+      .tile { padding: 12px 14px; min-height: 96px; }
+      .tile-value { font-size: 22px; line-height: 30px; height: 30px; }
+      th, td { padding: 9px 10px; }
+      /* Narrow screens: tables keep readable columns and scroll sideways inside their card. */
+      .table table { min-width: 720px; }
+      /* .stack tables (e.g. pending approvals) turn each row into a small card instead, so their buttons stay in view. */
+      .table.stack table { min-width: 0; }
+      .table.stack thead { display: none; }
+      .table.stack tr { display: grid; gap: 6px; padding: 14px; border-bottom: 1px solid var(--line); }
+      .table.stack tbody tr:last-child { border-bottom: 0; }
+      .table.stack td { display: block; border: 0; padding: 0; text-align: left; white-space: normal; }
+      .table.stack td.empty { padding: 14px 0; text-align: center; }
+      .step { padding-left: 50px; }
+      .step::before { left: 14px; top: 16px; }
+    }
+    /* ── end of the design system ── */
+    /* ── Local panel (no external fonts: the CSP allows none, so Inter only if it is installed) ── */
+    main { max-width: 1080px; }
+    .intro p { color: var(--text-2); margin-top: 6px; }
+    tr.active-row td { background: var(--blue-bg); }
+    tr.active-row td:first-child { box-shadow: inset 3px 0 0 var(--blue); }
+    .vault-sats { font: 650 14px var(--mono); color: var(--amber); }
+    td.action { text-align: right; white-space: nowrap; }
+    #error { margin-top: 16px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--red) 50%, var(--line)); background: var(--red-bg); color: var(--red); border-radius: 10px; font-weight: 550; }
+    #error:empty { display: none; }
+    .head-actions { margin-left: auto; }
 </style>
 </head>
 <body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <span class="wordmark"><span class="mark">A</span>AgentTresor</span>
+    <span class="secondary" style="font-weight:600">Local agent panel</span>
+    <span class="spacer"></span>
+    <span class="chip">this machine only</span>
+  </div>
+</header>
 <main>
-  <h1>Agents on this machine</h1>
-  <div class="muted">The active agent is the one your MCP clients reach at <code id="mcp"></code>. After switching, start a new conversation.</div>
+  <div class="intro">
+    <h1>Agents on this machine</h1>
+    <p>The active agent is the one your MCP clients reach at <code id="mcp"></code>. After switching, start a new conversation.</p>
+  </div>
   <div id="error"></div>
-  <h2>Agents</h2>
-  <div class="table"><table>
-    <thead><tr><th>Agent</th><th>Proxy</th><th>Key fingerprint</th><th>Vault</th><th></th></tr></thead>
-    <tbody id="agents"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
-  </table></div>
-  <h2>Doctor <button id="recheck">Check again</button></h2>
-  <ul id="checks" class="checks"><li class="muted">Checking…</li></ul>
+  <section class="card section">
+    <div class="card-head"><h2>Agents</h2></div>
+    <div class="table"><table>
+      <thead><tr><th>Agent</th><th>Proxy</th><th>Key fingerprint</th><th>Vault</th><th></th></tr></thead>
+      <tbody id="agents"><tr><td colspan="5" class="empty">Loading the agent profiles…</td></tr></tbody>
+    </table></div>
+  </section>
+  <section class="card section">
+    <div class="card-head"><h2>Doctor</h2><button id="recheck" class="small head-actions">Check again</button></div>
+    <ul id="checks" class="checklist"><li class="empty">Checking this machine…</li></ul>
+  </section>
 </main>
 <script nonce="${nonce}">
   const token = document.querySelector('meta[name="panel-token"]').content
@@ -232,29 +437,39 @@ export function panelPage (csrf: string, nonce: string): string {
     for (const c of children) e.append(c)
     return e
   }
+  const sats = n => Number(n).toLocaleString('en-US')
   async function api (path, init = {}) {
     const res = await fetch(path, { ...init, headers: { 'X-Panel-Token': token } })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status))
     return body
   }
-  function vaultText (v) {
-    if (!v) return el('span', { className: 'muted', textContent: 'unknown' })
-    if (v.status === 'none') return el('span', { className: 'warn', textContent: 'no key registered' })
-    const kind = v.version === 'v2' && v.caps ? 'v2, max ' + v.caps.maxSats + ' sats per payment, fee ≤ ' + v.caps.maxFeeSats : (v.version || '')
-    return el('span', { className: v.status === 'open' ? 'ok' : 'warn', textContent: v.satoshis + ' sats (' + v.status + ')' + (kind ? ' · ' + kind : '') })
+  const pill = (text, color) => el('span', { className: 'pill ' + (color || ''), textContent: text })
+  function vaultCell (a) {
+    const v = a.vault
+    const td = el('td')
+    if (!v) { td.append(el('span', { className: 'muted', textContent: 'unknown' })); return td }
+    if (v.status === 'none') { td.append(pill('no key registered', 'amber')); return td }
+    td.append(el('span', { className: 'vault-sats', textContent: sats(v.satoshis) + ' sats' }), ' ', pill(v.status.replace(/_/g, ' '), v.status === 'open' ? 'green' : 'amber'))
+    if (v.version && v.status === 'open') {
+      const caps = v.version === 'v2' && v.caps ? ' · ≤ ' + sats(v.caps.maxSats) + ' sats · fee ≤ ' + sats(v.caps.maxFeeSats) : ''
+      td.append(el('span', { className: 'sub' }, el('span', { className: 'badge' + (v.version === 'v2' ? ' amber' : ''), textContent: v.version + caps })))
+    }
+    if (typeof a.remainingTodaySats === 'number') td.append(el('span', { className: 'sub', textContent: sats(a.remainingTodaySats) + ' sats left today' }))
+    return td
   }
   async function loadAgents () {
     const { agents } = await api('/panel/api/agents')
     const rows = agents.map(a => {
       const who = el('td', {}, el('div', { className: 'mono', textContent: a.agentId }))
-      if (a.name) who.append(el('div', { textContent: a.name }))
-      if (a.active) who.append(el('div', { className: 'active', textContent: 'ACTIVE' }))
-      const proxy = el('td', {}, el('div', { className: 'mono', textContent: a.proxyUrl || '-' }),
-        el('div', { className: a.proxy === 'reachable' ? 'ok' : 'bad', textContent: a.error || a.proxy }))
-      const action = el('td')
+      if (a.name) who.append(el('div', { style: 'font-weight:650', textContent: a.name }))
+      if (a.active) who.append(el('span', { className: 'sub' }, pill('ACTIVE', 'blue')))
+      const reachable = a.proxy === 'reachable'
+      const proxy = el('td', {}, el('div', { className: 'mono secondary', textContent: a.proxyUrl || '-' }),
+        el('span', { className: 'sub' }, pill(a.error || a.proxy, reachable ? 'green' : 'red')))
+      const action = el('td', { className: 'action' })
       if (!a.active && a.proxyUrl) {
-        const b = el('button', { textContent: 'Activate' })
+        const b = el('button', { className: 'primary small', textContent: 'Activate' })
         b.addEventListener('click', async () => {
           b.disabled = true
           try { await api('/panel/api/agents/' + encodeURIComponent(a.agentId) + '/activate', { method: 'POST' }); $('error').textContent = '' } catch (err) { $('error').textContent = err.message }
@@ -262,20 +477,19 @@ export function panelPage (csrf: string, nonce: string): string {
         })
         action.append(b)
       }
-      const vault = el('td', {}, vaultText(a.vault))
-      if (typeof a.remainingTodaySats === 'number') vault.append(el('div', { className: 'muted', textContent: a.remainingTodaySats + ' sats left today' }))
-      return el('tr', {}, who, proxy, el('td', { className: 'fp', textContent: a.fingerprint || 'no key yet' }), vault, action)
+      return el('tr', { className: a.active ? 'active-row' : '' }, who, proxy, el('td', { className: 'fp', textContent: a.fingerprint || 'no key yet' }), vaultCell(a), action)
     })
-    $('agents').replaceChildren(...(rows.length ? rows : [el('tr', {}, el('td', { colSpan: 5, className: 'muted', textContent: 'No agent yet: npm run setup "<connection link>"' }))]))
+    $('agents').replaceChildren(...(rows.length ? rows : [el('tr', {}, el('td', { colSpan: 5, className: 'empty', textContent: 'No agent on this machine yet: run npm run setup "<connection link>" with the link from the dashboard.' }))]))
   }
   async function loadChecks () {
-    $('checks').replaceChildren(el('li', { className: 'muted', textContent: 'Checking…' }))
+    $('checks').replaceChildren(el('li', { className: 'empty', textContent: 'Checking this machine…' }))
     const { checks } = await api('/panel/api/doctor')
+    if (checks.length === 0) { $('checks').replaceChildren(el('li', { className: 'empty', textContent: 'No checks are available from this service.' })); return }
     $('checks').replaceChildren(...checks.map(c => {
-      const li = el('li', {}, el('span', { className: c.ok ? 'ok' : 'bad', textContent: (c.ok ? '✓ ' : '✗ ') + c.name + ': ' }), c.detail)
-      if (c.fixed) li.append(el('div', { className: 'fix muted', textContent: 'done: ' + c.fixed }))
-      if (!c.ok && c.fix) li.append(el('div', { className: 'fix' }, 'fix: ', el('code', { textContent: c.fix })))
-      return li
+      const body = el('div', {}, el('div', { className: 'name', textContent: c.name }), el('div', { className: 'secondary', textContent: c.detail }))
+      if (c.fixed) body.append(el('div', { className: 'fix', textContent: 'done: ' + c.fixed }))
+      if (!c.ok && c.fix) body.append(el('div', { className: 'fix' }, 'fix: ', el('code', { textContent: c.fix })))
+      return el('li', { className: c.ok ? 'ok' : 'bad' }, el('span', { className: 'icon', textContent: c.ok ? '✓' : '✗' }), body)
     }))
   }
   async function refresh () {
