@@ -213,6 +213,21 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
         t.dropColumn('status')
       })
     }
+  },
+  '007_anchor_source': {
+    async up (k) {
+      // Who made an anchor: the company's wallet (dashboard), a vault payment, or the operator's notary wallet.
+      await k.schema.alterTable('audit_anchors', t => {
+        t.string('source').notNullable().defaultTo('company')
+        t.integer('fee_sats')
+      })
+    },
+    async down (k) {
+      await k.schema.alterTable('audit_anchors', t => {
+        t.dropColumn('fee_sats')
+        t.dropColumn('source')
+      })
+    }
   }
 }
 

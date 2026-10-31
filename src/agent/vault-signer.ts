@@ -8,13 +8,17 @@
  *  - output 0 pays exactly the price the agent expects, to the announced script;
  *  - either output 1 returns the change to the same vault script (the agent's
  *    vault), or there is no output 1 (a request vault the company funded for
- *    exactly this payment); nothing else;
+ *    exactly this payment);
+ *  - optionally, last, one 0-sat OP_RETURN anchoring the audit log (exactly the
+ *    AgentTresor anchor form: it carries no value and no spendable script);
+ *    nothing else;
  *  - the fee (input - outputs) is what the proxy announced, and at most `maxFeeSats`
  *    (in the 1-output form everything but the price is fee, so this bounds the vault).
  * The input value comes from the proxy, but BIP-143 signs it: if it is wrong,
  * the signature is invalid on chain and nothing can be spent with it.
  */
 import { LockingScript, Transaction, type PrivateKey } from '../shared/bsv.js'
+import { parseAnchorScript } from '../audit/anchor-script.js'
 import { parseVaultScript, signVaultInput } from '../vault/script.js'
 
 export interface VaultSignAnswer {
@@ -46,8 +50,14 @@ export function signVaultPayment (answer: VaultSignAnswer, agentKey: PrivateKey,
 
   const tx = Transaction.fromHex(answer.unsignedTx)
   if (tx.inputs.length !== 1) refuse(`expected 1 input, got ${tx.inputs.length}`)
-  if (tx.outputs.length !== 1 && tx.outputs.length !== 2) refuse(`expected 1 or 2 outputs, got ${tx.outputs.length}`)
-  const [pay, change] = tx.outputs
+  const outputs = [...tx.outputs]
+  const last = outputs.at(-1)
+  if (outputs.length > 1 && last !== undefined && parseAnchorScript(last.lockingScript) !== undefined) {
+    if (last.satoshis !== 0) refuse('the audit anchor output must hold 0 sats')
+    outputs.pop()
+  }
+  if (outputs.length !== 1 && outputs.length !== 2) refuse(`expected 1 or 2 outputs besides an audit anchor, got ${outputs.length}`)
+  const [pay, change] = outputs
   if (pay.satoshis !== expectedPriceSats) refuse(`output 0 pays ${String(pay.satoshis)} sats, expected ${expectedPriceSats}`)
   if (answer.merchantOutput.satoshis !== expectedPriceSats) refuse('the announced price differs from the expected price')
   if (pay.lockingScript.toHex() !== answer.merchantOutput.lockingScript || !P2PKH.test(answer.merchantOutput.lockingScript)) {

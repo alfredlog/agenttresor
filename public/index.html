@@ -59,6 +59,14 @@
     .toggle { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; margin-left: 12px; }
     .toggle input { width: auto; }
     td.agent-actions button { margin: 0 4px 4px 0; }
+    .banner { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; border: 1px solid var(--warn); color: var(--warn); background: var(--card); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; font-weight: 600; }
+    .banner.empty { border-color: var(--bad); color: var(--bad); }
+    .banner button { font-weight: 400; }
+    .notary-ok { color: var(--ok); font-weight: 600; }
+    .notary-low { color: var(--warn); font-weight: 600; }
+    .notary-empty { color: var(--bad); font-weight: 600; }
+    #notary-amount { width: 140px; }
+    #notary-msg.failed { color: var(--bad); }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -71,6 +79,12 @@
     <input id="token" type="password" placeholder="Admin token" autocomplete="off">
     <button id="save">Use token</button>
     <span id="error"></span>
+  </div>
+
+  <!-- Orange when the notary has fewer than NOTARY_LOW_ANCHORS anchors left, red when it has none. -->
+  <div id="notary-banner" class="banner" hidden>
+    <span id="notary-banner-text"></span>
+    <button class="primary" data-notary-topup>Top up notary from BSV Desktop</button>
   </div>
 
   <h2>Agents <label class="toggle"><input id="show-deleted" type="checkbox"> show deleted</label></h2>
@@ -151,10 +165,26 @@
     <tbody id="audit"></tbody>
   </table></div>
   <h2 style="font-size:13px">Anchors on BSV</h2>
-  <div class="table"><table>
-    <thead><tr><th class="num">#</th><th>Head hash</th><th>Transaction</th><th>Still matches the log</th></tr></thead>
-    <tbody id="anchors"><tr><td colspan="4" class="muted">None yet.</td></tr></tbody>
+  <div class="muted hint">Anchors come from three places: each vault payment carries one, the notary adds one when the log has
+    been idle, and you can anchor any time with the button above.</div>
+  <div class="table" style="margin-top:8px"><table>
+    <thead><tr><th class="num">#</th><th>Head hash</th><th>By</th><th>Transaction</th><th>Still matches the log</th></tr></thead>
+    <tbody id="anchors"><tr><td colspan="5" class="muted">None yet.</td></tr></tbody>
   </table></div>
+
+  <h2 style="font-size:13px">Notary</h2>
+  <div class="card">
+    <div id="notary-status" class="muted">Enter the admin token.</div>
+    <p class="hint muted">The notary is the operator's own small fee wallet. When entries are left unanchored and nothing has happened
+      for <span id="notary-idle">2 minutes</span>, it anchors the log head itself, so every event ends up on BSV even without payments.
+      <strong>A top-up pays anchoring fees only</strong>: the notary can write audit anchors and nothing else. It holds no vault key and
+      never touches company or agent funds, and it never holds more than <span id="notary-max">1000000</span> sats.</p>
+    <div id="notary-actions" class="actions" hidden>
+      <label>Amount (sats) <input id="notary-amount" type="number" min="1" step="1"></label>
+      <button class="primary" data-notary-topup>Top up notary from BSV Desktop</button>
+      <span id="notary-msg" class="muted"></span>
+    </div>
+  </div>
 </main>
 <script type="module">
   // Built by `npm run build:web` from src/shared/fingerprint.ts (the agent and vault.html use the same function).
@@ -194,6 +224,8 @@
 
   let agents = []
   let anchoring = false
+  let toppingUp = false
+  const SOURCE = { company: 'you (BSV Desktop)', payment: 'payment', notary: 'notary' }
 
   /** key=value pairs of an audit entry's data, for the table (escaped by the caller). */
   const details = data => Object.entries(data ?? {})
@@ -232,11 +264,34 @@
           <td class="mono">${esc(e.type)}</td><td class="details mono">${esc(details(e.data))}</td></tr>`).join('')
     const matches = new Map(check.anchors.map(a => [a.txid, a.matches]))
     $('anchors').innerHTML = anchors.length === 0
-      ? '<tr><td colspan="4" class="muted">None yet.</td></tr>'
+      ? '<tr><td colspan="5" class="muted">None yet.</td></tr>'
       : anchors.slice().reverse().map(a => `<tr>
-          <td class="num mono">${esc(a.seq)}</td><td class="mono">${esc(a.hash.slice(0, 16))}…</td>
+          <td class="num mono">${esc(a.seq)}</td><td class="mono">${esc(a.hash.slice(0, 16))}…</td><td>${esc(SOURCE[a.source] ?? a.source)}</td>
           <td class="mono"><a href="${esc(a.explorerUrl)}" target="_blank" rel="noopener">${esc(a.txid.slice(0, 16))}…</a></td>
           <td class="${matches.get(a.txid) ? 'chain-ok' : 'chain-bad'}">${matches.get(a.txid) ? 'yes' : 'NO'}</td></tr>`).join('')
+  }
+
+  /** Notary balance and the low-balance banner (orange: few anchors left, red: none). */
+  function renderNotary (n) {
+    $('notary-actions').hidden = !n.enabled
+    if (!n.enabled) {
+      $('notary-banner').hidden = true
+      $('notary-status').className = 'muted'
+      $('notary-status').textContent = `Notary disabled: ${n.reason}. Payments and the Anchor button still anchor the log.`
+      return
+    }
+    $('notary-status').className = `notary-${n.level}`
+    $('notary-status').textContent = `${n.balanceSats} sats · about ${n.anchorsLeft} anchors left at ~${n.avgAnchorCostSats} sats each` +
+      (n.outOfFunds ? ' · out of funds: idle anchoring paused' : '') + (n.lastError ? ` · last error: ${n.lastError}` : '')
+    $('notary-idle').textContent = n.idleMs >= 60_000 ? `${Math.round(n.idleMs / 60_000)} minutes` : `${Math.round(n.idleMs / 1000)} seconds`
+    $('notary-max').textContent = n.maxSats
+    $('notary-banner').hidden = n.banner === null
+    $('notary-banner').className = n.level === 'empty' ? 'banner empty' : 'banner'
+    $('notary-banner-text').textContent = n.banner ?? ''
+    const amount = $('notary-amount')
+    amount.max = String(n.topUpRoomSats)
+    if (amount.value === '') amount.value = String(Math.min(n.topUpRoomSats, 5000))
+    for (const b of document.querySelectorAll('[data-notary-topup]')) b.disabled = toppingUp || n.topUpRoomSats < 1
   }
 
   /** The buttons an agent's row offers, by its status. A deleted agent has none: it is only kept for its history. */
@@ -271,6 +326,8 @@
         api($('show-deleted').checked ? '/admin/agents?deleted=1' : '/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'),
         api('/admin/audit/verify'), api('/admin/audit/head')
       ])
+      // Own catch: an older proxy without /admin/notary must not break the rest of the page.
+      api('/admin/notary').then(renderNotary).catch(err => { $('notary-status').textContent = `Notary: ${err.message}` })
       agents = list
       renderAgents()
       renderAudit(audit, check, head)
@@ -489,6 +546,31 @@
     }
     await refresh()
   })
+
+  // ── Top up the notary from BSV Desktop: a BRC-29 payment for anchoring fees only ──
+  for (const b of document.querySelectorAll('[data-notary-topup]')) {
+    b.addEventListener('click', async () => {
+      const sats = Number($('notary-amount').value)
+      if (!Number.isSafeInteger(sats) || sats < 1) { $('notary-amount').reportValidity(); $('notary-amount').focus(); return }
+      if (!confirm(`Send ${sats} sats from BSV Desktop to the notary?\n\nThis pays audit anchoring fees only. The notary cannot spend company or agent funds.`)) return
+      toppingUp = true
+      for (const x of document.querySelectorAll('[data-notary-topup]')) x.disabled = true
+      $('notary-msg').className = 'muted'
+      $('notary-msg').textContent = 'Approve the payment in BSV Desktop…'
+      try {
+        const { topUpNotaryNow } = await import('./audit.js')
+        const r = await topUpNotaryNow(location.origin, store.get(), sats)
+        $('notary-msg').textContent = `Topped up ${r.satoshis} sats; the notary now holds ${r.balanceSats} sats.`
+        $('notary-amount').value = ''
+      } catch (err) {
+        $('notary-msg').className = 'failed'
+        $('notary-msg').textContent = `Not topped up: ${err.message}`
+      } finally {
+        toppingUp = false
+      }
+      await refresh()
+    })
+  }
 
   $('verify-full').addEventListener('click', async ev => {
     const btn = ev.currentTarget // currentTarget is null once the handler awaits

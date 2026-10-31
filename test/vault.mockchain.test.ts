@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../src/agent/vault-signer'
+import { parseAnchorScript } from '../src/audit/anchor-script'
 import { approveAndFund, confirmedFingerprint, fundVault, reclaimVault } from '../src/company/vault-client'
 import { fingerprint } from '../src/shared/fingerprint'
 import { createMerchantApp, REPORT_PRICE_SATS, ROOM_RATES_SATS } from '../src/merchant/app'
@@ -174,6 +175,11 @@ describe('what the vault refuses', () => {
     expect(() => signVaultPayment(tamper(tx => { tx.outputs[1].satoshis! -= 5_000 }), agent.signer, REPORT_PRICE_SATS)).toThrow(/fee/)
     // An extra output.
     expect(() => signVaultPayment(tamper(tx => { tx.addOutput({ satoshis: 1, lockingScript: thief }) }), agent.signer, REPORT_PRICE_SATS)).toThrow(/2 outputs/)
+    // The audit anchor (last output) may carry no value, and must be exactly an AgentTresor anchor.
+    expect(parseAnchorScript(Transaction.fromHex(answer.unsignedTx).outputs[2].lockingScript)).toBeDefined()
+    expect(() => signVaultPayment(tamper(tx => { tx.outputs[2].satoshis = 500; tx.outputs[1].satoshis! -= 500 }), agent.signer, REPORT_PRICE_SATS)).toThrow(/anchor output must hold 0 sats/)
+    expect(() => signVaultPayment(tamper(tx => { tx.outputs[2].lockingScript = LockingScript.fromHex('006a0474657374') }), agent.signer, REPORT_PRICE_SATS)).toThrow(/2 outputs/)
+    expect(() => signVaultPayment(tamper(tx => { tx.outputs.splice(1, 0, { satoshis: 0, lockingScript: thief }) }), agent.signer, REPORT_PRICE_SATS)).toThrow(/refusing/)
     // Another agent's vault.
     expect(() => signVaultPayment(answer, PrivateKey.fromRandom(), REPORT_PRICE_SATS)).toThrow(/does not belong/)
     // The genuine answer is fine.

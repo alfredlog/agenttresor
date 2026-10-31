@@ -9,6 +9,7 @@ import express, { type Express } from 'express'
 import { P2PKH, PrivateKey, Transaction, UnlockingScript, Utils } from '@bsv/sdk'
 import type { Wallet } from '@bsv/wallet-toolbox'
 import { signVaultPayment, type VaultSignAnswer } from '../src/agent/vault-signer'
+import { parseAnchorScript } from '../src/audit/anchor-script'
 import { approveAndFund, confirmedFingerprint, getApproval, reclaimRequestVault } from '../src/company/vault-client'
 import { createMerchantApp, ROOM_RATES_SATS } from '../src/merchant/app'
 import { createPaymentMiddleware } from '../src/shared/brc121'
@@ -92,7 +93,10 @@ describe('approval = funding', () => {
     expect(exec.status).toBe(200)
     const answer = exec.body as VaultSignAnswer
     const tx = Transaction.fromHex(answer.unsignedTx)
-    expect(tx.outputs).toHaveLength(1)
+    // The merchant, then the 0-sat anchor of the audit log head: no change output.
+    expect(tx.outputs).toHaveLength(2)
+    expect(tx.outputs[1].satoshis).toBe(0)
+    expect(parseAnchorScript(tx.outputs[1].lockingScript)).toBeDefined()
     expect(`${tx.inputs[0].sourceTXID!}.${tx.inputs[0].sourceOutputIndex}`).toBe(`${funded.txid}.${funded.vout}`)
     expect(answer).toMatchObject({ sourceSatoshis: approval.totalSats, feeSats: approval.feeSats, merchantOutput: { satoshis: ROOM_RATES_SATS.standard } })
 

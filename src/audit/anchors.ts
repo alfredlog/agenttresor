@@ -29,7 +29,7 @@ export async function recordAnchor (audit: AuditLog, chainTracker: ChainTracker,
 
   const txid = tx.id('hex')
   if ((await audit.anchors()).some(a => a.txid === txid)) throw new ProxyError(409, 'this anchor is already recorded')
-  const anchor: AuditAnchor = { seq, hash, txid, at: now }
+  const anchor: AuditAnchor = { seq, hash, txid, at: now, source: 'company', feeSats: null }
   // The anchor and its own log entry are written together.
   await audit.transaction(async a => {
     await a.addAnchor(anchor)

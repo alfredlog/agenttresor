@@ -16,8 +16,11 @@ import type { Knex } from 'knex'
 
 export const GENESIS_HASH = '0'.repeat(64)
 
-/** Who did it: the company's rules, the admin (dashboard), an agent, or the company's wallet. */
-export type AuditActor = 'rules' | 'admin' | 'company' | `agent:${string}`
+/**
+ * Who did it: the company's rules, the admin (dashboard), an agent, the company's wallet,
+ * the proxy itself (an anchor inside a vault payment), or the operator's notary wallet.
+ */
+export type AuditActor = 'rules' | 'admin' | 'company' | 'proxy' | 'notary' | `agent:${string}`
 
 export type AuditType =
   | 'agent.created' | 'agent.rules_changed' | 'agent.key_registered' | 'agent.connect_code_issued' | 'agent.connected'
@@ -26,6 +29,7 @@ export type AuditType =
   | 'vault.funded' | 'vault.payment' | 'vault.reclaimed'
   | 'request_vault.funded' | 'request_vault.reclaimed'
   | 'audit.anchor_recorded'
+  | 'notary.topped_up' | 'notary.low_balance'
 
 export interface AuditEntry {
   seq: number
@@ -37,11 +41,17 @@ export interface AuditEntry {
   hash: string
 }
 
+/** Who paid for an anchor: the company (dashboard button), a vault payment it rode in, or the notary. */
+export type AnchorSource = 'company' | 'payment' | 'notary'
+
 export interface AuditAnchor {
   seq: number
   hash: string
   txid: string
   at: number
+  source: AnchorSource
+  /** The transaction fee, when the proxy knows it (notary anchors). */
+  feeSats: number | null
 }
 
 /** JSON with object keys sorted at every level, so the same data always hashes the same. */
@@ -223,11 +233,30 @@ export class AuditLog {
   }
 
   async addAnchor (a: AuditAnchor): Promise<void> {
-    await this.db('audit_anchors').insert(a)
+    await this.db('audit_anchors').insert({ seq: a.seq, hash: a.hash, txid: a.txid, at: a.at, source: a.source, fee_sats: a.feeSats })
   }
 
   async anchors (): Promise<AuditAnchor[]> {
-    return await this.db('audit_anchors').orderBy('seq', 'asc').select('seq', 'hash', 'txid', 'at')
+    return (await this.db('audit_anchors').orderBy([{ column: 'seq', order: 'asc' }, { column: 'at', order: 'asc' }]))
+      .map(r => ({ seq: r.seq, hash: r.hash, txid: r.txid, at: Number(r.at), source: r.source, feeSats: r.fee_sats ?? null }))
+  }
+
+  /** Fees of the newest anchors of one source, newest first (the notary's cost estimate). */
+  async anchorFees (source: AnchorSource, limit: number): Promise<number[]> {
+    return (await this.db('audit_anchors').where({ source }).whereNotNull('fee_sats').orderBy('at', 'desc').limit(limit).select('fee_sats'))
+      .map(r => Number(r.fee_sats))
+  }
+
+  /** When the newest entry was written (0 for an empty log). */
+  async headAt (): Promise<number> {
+    const last = await this.db('audit_log').orderBy('seq', 'desc').first('at')
+    return last === undefined ? 0 : Number(last.at)
+  }
+
+  /** The newest entry of one of these types, if any. */
+  async latestOfType (types: AuditType[]): Promise<AuditEntry | undefined> {
+    const row = await this.db('audit_log').whereIn('type', types).orderBy('seq', 'desc').first()
+    return row === undefined ? undefined : toEntry(row)
   }
 
   /**
