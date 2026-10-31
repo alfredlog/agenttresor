@@ -41,6 +41,8 @@ export interface VaultParams {
   keyID: string
   /** Set when the proxy runs with VAULT_COVENANT=true: fund a v2 vault capped at maxSats per payment and maxFeeSats of fee. */
   covenant?: { maxSats: number, maxFeeSats: number } | null
+  /** Under EUR rules: the exact euro limit the policy keeps; the covenant's maxSats is its on-chain ceiling. */
+  policy?: { currency: 'EUR', maxPerPaymentCents: number } | null
 }
 
 /** The keys of an agent's vault, before funding (the page computes the fingerprint from agentPub). */

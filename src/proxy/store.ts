@@ -6,7 +6,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import makeKnex, { type Knex } from 'knex'
 import type { MerchantAnswer } from '../shared/merchant.js'
-import { DEFAULT_RULES, type Rules } from './rules.js'
+import { DEFAULT_RULES, isEur, type Rules } from './rules.js'
 
 export type RequestStatus = 'pending' | 'approved' | 'denied' | 'paid' | 'paid_not_delivered' | 'failed' | 'expired'
 export const REQUEST_STATUSES: RequestStatus[] = ['pending', 'approved', 'denied', 'paid', 'paid_not_delivered', 'failed', 'expired']
@@ -44,6 +44,13 @@ export interface PaymentRequestRecord {
   decidedAt: number | null
   decidedBy: string | null
   paidAt: number | null
+  /** The BSV/EUR rate used for this request (€ per BSV), if one was available. */
+  eurRate: number | null
+  /** The price in euro cents at that rate, rounded up. */
+  eurCents: number | null
+  rateSource: string | null
+  /** When the source last updated that rate. */
+  rateAt: number | null
 }
 
 const MIGRATIONS: Record<string, Knex.Migration> = {
@@ -228,6 +235,38 @@ const MIGRATIONS: Record<string, Knex.Migration> = {
         t.dropColumn('source')
       })
     }
+  },
+  '008_eur_budgets': {
+    async up (k) {
+      // Budgets in euros: EUR rules keep their limits in cents (the *_sats columns are 0 for them).
+      await k.schema.alterTable('rules', t => {
+        t.string('currency').notNullable().defaultTo('SAT')
+        t.bigInteger('max_per_payment_cents')
+        t.bigInteger('daily_budget_cents')
+        t.bigInteger('approval_threshold_cents')
+      })
+      // The rate each request was judged (and paid) at, for EUR budgets and for accounting.
+      await k.schema.alterTable('requests', t => {
+        t.double('eur_rate')
+        t.bigInteger('eur_cents')
+        t.string('rate_source')
+        t.bigInteger('rate_at')
+      })
+    },
+    async down (k) {
+      await k.schema.alterTable('requests', t => {
+        t.dropColumn('rate_at')
+        t.dropColumn('rate_source')
+        t.dropColumn('eur_cents')
+        t.dropColumn('eur_rate')
+      })
+      await k.schema.alterTable('rules', t => {
+        t.dropColumn('approval_threshold_cents')
+        t.dropColumn('daily_budget_cents')
+        t.dropColumn('max_per_payment_cents')
+        t.dropColumn('currency')
+      })
+    }
   }
 }
 
@@ -265,7 +304,11 @@ function toRecord (row: any): PaymentRequestRecord {
     createdAt: row.created_at,
     decidedAt: row.decided_at,
     decidedBy: row.decided_by,
-    paidAt: row.paid_at
+    paidAt: row.paid_at,
+    eurRate: row.eur_rate ?? null,
+    eurCents: row.eur_cents ?? null,
+    rateSource: row.rate_source ?? null,
+    rateAt: row.rate_at ?? null
   }
 }
 
@@ -286,7 +329,11 @@ function toRow (r: Partial<PaymentRequestRecord>): Record<string, unknown> {
     createdAt: ['created_at', v => v],
     decidedAt: ['decided_at', v => v],
     decidedBy: ['decided_by', v => v],
-    paidAt: ['paid_at', v => v]
+    paidAt: ['paid_at', v => v],
+    eurRate: ['eur_rate', v => v],
+    eurCents: ['eur_cents', v => v],
+    rateSource: ['rate_source', v => v],
+    rateAt: ['rate_at', v => v]
   }
   const row: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(r)) {
@@ -380,8 +427,18 @@ export class ProxyStore {
   async getRules (agentId: string): Promise<Rules> {
     const row = await this.db('rules').where({ agent_id: agentId }).first()
     if (row === undefined) return DEFAULT_RULES
+    if (row.currency === 'EUR') {
+      return {
+        allowedHosts: JSON.parse(row.allowed_hosts),
+        currency: 'EUR',
+        maxPerPaymentCents: Number(row.max_per_payment_cents ?? 0),
+        dailyBudgetCents: Number(row.daily_budget_cents ?? 0),
+        approvalThresholdCents: Number(row.approval_threshold_cents ?? 0)
+      }
+    }
     return {
       allowedHosts: JSON.parse(row.allowed_hosts),
+      currency: 'SAT',
       maxPerPaymentSats: row.max_per_payment_sats,
       dailyBudgetSats: row.daily_budget_sats,
       approvalThresholdSats: row.approval_threshold_sats
@@ -422,6 +479,18 @@ export class ProxyStore {
     return Number(row?.total ?? 0)
   }
 
+  /**
+   * Euro cents spent for this agent since `sinceMs`: the sum of the cents
+   * recorded at payment time. Paid requests with no recorded cents (paid
+   * under SAT rules before a switch to EUR) are returned as `unpricedSats`.
+   */
+  async spentCentsSince (agentId: string, sinceMs: number): Promise<{ cents: number, unpricedSats: number }> {
+    const spent = (): Knex.QueryBuilder => this.db('requests').where({ agent_id: agentId }).whereIn('status', SPENT_STATUSES).where('paid_at', '>=', sinceMs)
+    const priced = await spent().whereNotNull('eur_cents').sum({ total: 'eur_cents' }).first()
+    const unpriced = await spent().whereNull('eur_cents').sum({ total: 'price_sats' }).first()
+    return { cents: Number(priced?.total ?? 0), unpricedSats: Number(unpriced?.total ?? 0) }
+  }
+
   /** Marks pending and approved requests that waited too long as expired. */
   /** Marks pending and approved requests that waited too long as expired; returns which ones. */
   async expireStale (nowMs: number, ttl: { pendingMs: number, approvedMs: number }): Promise<Array<{ id: string, agentId: string, was: 'pending' | 'approved' }>> {
@@ -445,10 +514,27 @@ export class ProxyStore {
 }
 
 function rulesRow (rules: Rules): Record<string, unknown> {
+  const hosts = JSON.stringify(rules.allowedHosts)
+  if (isEur(rules)) {
+    return {
+      allowed_hosts: hosts,
+      currency: 'EUR',
+      max_per_payment_sats: 0,
+      daily_budget_sats: 0,
+      approval_threshold_sats: 0,
+      max_per_payment_cents: rules.maxPerPaymentCents,
+      daily_budget_cents: rules.dailyBudgetCents,
+      approval_threshold_cents: rules.approvalThresholdCents
+    }
+  }
   return {
-    allowed_hosts: JSON.stringify(rules.allowedHosts),
+    allowed_hosts: hosts,
+    currency: 'SAT',
     max_per_payment_sats: rules.maxPerPaymentSats,
     daily_budget_sats: rules.dailyBudgetSats,
-    approval_threshold_sats: rules.approvalThresholdSats
+    approval_threshold_sats: rules.approvalThresholdSats,
+    max_per_payment_cents: null,
+    daily_budget_cents: null,
+    approval_threshold_cents: null
   }
 }

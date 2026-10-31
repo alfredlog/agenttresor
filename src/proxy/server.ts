@@ -4,6 +4,7 @@
  * PROXY_PUBLIC_URL (e.g. https://agentpay.example, for connection links), TRUST_PROXY=1 behind a reverse proxy.
  * Vaults: VAULT_COVENANT=true makes NEW agent vaults v2 (OP_PUSH_TX covenant; default false),
  * VAULT_COVENANT_MAX_FEE_SATS (1000) caps their fee per payment.
+ * Budgets in euros: the BSV/EUR rate comes from CoinGecko (cached 60 s); EUR payments are denied without it.
  * Anchoring: AUTO_ANCHOR_PAYMENTS (default true), AUTO_ANCHOR_NOTARY (default true), NOTARY_ROOT_KEY
  * (64 hex chars; missing = no notary), ANCHOR_IDLE_MS (120000), NOTARY_LOW_ANCHORS (20), NOTARY_MAX_SATS (1000000).
  *
@@ -15,6 +16,7 @@ import 'dotenv/config'
 import { ArcadeChainTracker } from '../shared/arcade.js'
 import { PrivateKey } from '../shared/bsv.js'
 import { arcadeUrl, getNetwork } from '../shared/network.js'
+import { coingeckoRateProvider } from '../shared/rate.js'
 import { openServerWallet, type ServerWallet } from '../shared/wallet.js'
 import { ArcadeBroadcaster } from '../vault/broadcaster.js'
 import { createProxyApp, notaryOf } from './app.js'
@@ -71,6 +73,8 @@ const app = createProxyApp({
   anchorPayments: flag('AUTO_ANCHOR_PAYMENTS', true),
   vaultCovenant: flag('VAULT_COVENANT', false),
   vaultCovenantMaxFeeSats: positiveInt('VAULT_COVENANT_MAX_FEE_SATS', 1_000),
+  // BSV/EUR for budgets in euros (CoinGecko, cached 60 s); EUR payments are denied while it is unavailable.
+  rates: coingeckoRateProvider(log),
   log,
   notaryDisabledReason,
   notary: notaryWallet === undefined

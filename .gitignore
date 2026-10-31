@@ -10,6 +10,7 @@ mcp-data/
 public/vault.js
 public/fingerprint.js
 public/setup-command.js
+public/rules-form.js
 public/audit.js
 # Per user, written by npm run setup (see .mcp.json.example)
 .mcp.json

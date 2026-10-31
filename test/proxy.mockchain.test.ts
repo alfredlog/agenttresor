@@ -240,7 +240,8 @@ describe('authentication', () => {
       key: `${apiKey.slice(0, 8)}…`,
       connected: true,
       createdAt: expect.any(String),
-      rules: { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 },
+      // Rules sent without a currency are in sats.
+      rules: { allowedHosts: [merchantHost], currency: 'SAT', maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 },
       vault: { status: 'no_key', satoshis: 0, agentPub: null, covenant: null }
     })
     // An agent with a funded vault shows its status, balance and public signing key.

@@ -21,7 +21,8 @@ import { ProxyError } from './errors.js'
 import { generateAgentKey, hashAgentKey } from './keys.js'
 import { callMerchant, preflight, type MerchantCall } from '../shared/merchant.js'
 import type { Notifier } from './notifier.js'
-import { dayStart, evaluate, hostAllowed, type Rules } from './rules.js'
+import { centsToSats, freshQuote, satsToCents, type RateProvider, type RateQuote } from '../shared/rate.js'
+import { dayStart, evaluate, hostAllowed, isEur, type Currency, type Rules } from './rules.js'
 import type { Agent, AgentStatus, MerchantAnswer, PaymentRequestRecord, ProxyStore } from './store.js'
 
 export { ProxyError }
@@ -52,7 +53,28 @@ export interface ServiceOptions {
   pendingTtlMs?: number
   /** An approved request expires after this long without being executed (default 24 h). */
   approvedTtlMs?: number
+  /** The BSV/EUR rate: needed by EUR rules, recorded with every request when available. */
+  rates?: RateProvider
 }
+
+/** GET /v1/budget */
+export interface BudgetView {
+  rules: Rules
+  currency: Currency
+  spentTodaySats: number
+  /** Under EUR rules: the remaining euros at the current rate, rounded down (0 without a rate). */
+  remainingTodaySats: number
+  /** EUR rules only. */
+  spentTodayCents?: number
+  remainingTodayCents?: number
+  /** The current BSV/EUR quote, if one is fresh. */
+  rate: RateQuote | null
+  day: string
+  vault: VaultBalance
+}
+
+type RateFields = Pick<PaymentRequestRecord, 'eurRate' | 'eurCents' | 'rateSource' | 'rateAt'>
+const NO_RATE: RateFields = { eurRate: null, eurCents: null, rateSource: null, rateAt: null }
 
 const errorMessage = (err: unknown): string => err instanceof Error ? err.message : String(err)
 
@@ -67,6 +89,7 @@ export class SpendControl {
   private readonly notifier: Notifier
   private readonly now: () => number
   private readonly ttl: { pendingMs: number, approvedMs: number }
+  private readonly rates?: RateProvider
   private readonly locks = new Map<string, Promise<unknown>>()
 
   constructor (opts: ServiceOptions) {
@@ -76,6 +99,42 @@ export class SpendControl {
     this.notifier = opts.notifier
     this.now = opts.now
     this.ttl = { pendingMs: opts.pendingTtlMs ?? 7 * 86_400_000, approvedMs: opts.approvedTtlMs ?? 86_400_000 }
+    this.rates = opts.rates
+  }
+
+  /** The current quote, if any (freshness is judged by the caller). */
+  private async quote (): Promise<RateQuote | undefined> {
+    return await this.rates?.current().catch(() => undefined)
+  }
+
+  /** The rate fields recorded with a request of `sats`: only from a fresh quote. */
+  private rateFields (sats: number, quote: RateQuote | undefined, now: number): RateFields {
+    if (!freshQuote(quote, now)) return NO_RATE
+    return { eurRate: quote.rate, eurCents: satsToCents(sats, quote.rate), rateSource: quote.source, rateAt: quote.at }
+  }
+
+  /**
+   * What the agent spent today, in the rules' unit. Under EUR rules: the cents
+   * recorded at payment time; payments recorded without cents are converted
+   * at the current rate (without one, evaluate() denies anyway).
+   */
+  private async spentToday (agentId: string, rules: Rules, now: number, quote: RateQuote | undefined): Promise<number> {
+    if (!isEur(rules)) return await this.store.spentSince(agentId, dayStart(now))
+    const { cents, unpricedSats } = await this.store.spentCentsSince(agentId, dayStart(now))
+    return cents + (unpricedSats > 0 && freshQuote(quote, now) ? satsToCents(unpricedSats, quote.rate) : 0)
+  }
+
+  /** Re-decides an approved request at execute time with the current rate, and records that rate. */
+  private async decideAtExecute (agent: Agent, record: PaymentRequestRecord, sats: number): Promise<Outcome | undefined> {
+    const now = this.now()
+    const rules = await this.store.getRules(agent.id)
+    const quote = await this.quote()
+    const decision = evaluate(rules, await this.spentToday(agent.id, rules, now, quote), new URL(record.url).host, sats, { quote, now })
+    if (decision.decision === 'deny') return await this.denyAtExecute(record.id, agent.id, decision.reason)
+    // The rate at payment time is what the ledger and the EUR daily budget count.
+    const rate = this.rateFields(sats, quote, now)
+    if (rate.eurRate !== null || record.eurRate !== null) await this.store.updateRequest(record.id, rate)
+    return undefined
   }
 
   /** POST /v1/pay */
@@ -104,7 +163,8 @@ export class SpendControl {
         createdAt: now,
         decidedAt: null,
         decidedBy: null,
-        paidAt: null
+        paidAt: null,
+        ...NO_RATE
       }
       const refuse = async (status: 'denied' | 'failed', reason: string, httpStatus: number, extra: Partial<PaymentRequestRecord> = {}): Promise<Outcome> => {
         const record = await this.inTransaction(async (store, audit) => {
@@ -129,9 +189,10 @@ export class SpendControl {
       if (pf.kind === 'free') return { kind: 'free', answer: pf.answer }
       if (pf.kind === 'invalid') return await refuse('failed', pf.reason, 502)
 
-      const priced = { priceSats: pf.sats, serverKey: pf.serverKey }
-      const spent = await this.store.spentSince(agent.id, dayStart(now))
-      const decision = evaluate(rules, spent, host, pf.sats)
+      const quote = await this.quote()
+      const priced = { priceSats: pf.sats, serverKey: pf.serverKey, ...this.rateFields(pf.sats, quote, now) }
+      const spent = await this.spentToday(agent.id, rules, now, quote)
+      const decision = evaluate(rules, spent, host, pf.sats, { quote, now })
       if (decision.decision === 'deny') return await refuse('denied', decision.reason, 403, priced)
 
       // Above the threshold the company funds the payment itself when it approves it.
@@ -200,11 +261,9 @@ export class SpendControl {
       if (record.serverKey !== null && pf.serverKey !== record.serverKey) {
         return await fail('merchant identity key changed after approval; nothing paid')
       }
-      // The approval lifts the threshold only: host, per-payment and daily limits still apply.
-      const now = this.now()
-      const rules = await this.store.getRules(agent.id)
-      const decision = evaluate(rules, await this.store.spentSince(agent.id, dayStart(now)), new URL(record.url).host, pf.sats)
-      if (decision.decision === 'deny') return await this.denyAtExecute(id, agent.id, decision.reason)
+      // The approval lifts the threshold only: host, per-payment and daily limits still apply, at the current rate.
+      const denied = await this.decideAtExecute(agent, record, pf.sats)
+      if (denied !== undefined) return denied
       const short = await this.vault.capacityProblem(agent.id, pf.sats)
       if (short !== undefined) throw new ProxyError(403, short)
       return { kind: 'sign', record, sign: await this.vault.prepare(agent.id, record.id, pf.sats, pf.serverKey) }
@@ -226,11 +285,9 @@ export class SpendControl {
     if (record.serverKey !== null && pf.serverKey !== record.serverKey) {
       return await fail('merchant identity key changed after approval; nothing paid, the company can reclaim the request vault')
     }
-    // The approval funds the payment; host, per-payment and daily limits still apply.
-    const now = this.now()
-    const rules = await this.store.getRules(agent.id)
-    const decision = evaluate(rules, await this.store.spentSince(agent.id, dayStart(now)), new URL(record.url).host, pf.sats)
-    if (decision.decision === 'deny') return await this.denyAtExecute(record.id, agent.id, decision.reason)
+    // The approval funds the payment; host, per-payment and daily limits still apply, at the current rate.
+    const denied = await this.decideAtExecute(agent, record, pf.sats)
+    if (denied !== undefined) return denied
     return { kind: 'sign', record, sign: await this.vault.prepareFromRequestVault(agent.id, record.id, pf.sats, pf.serverKey) }
   }
 
@@ -315,16 +372,22 @@ export class SpendControl {
     return record
   }
 
-  async budget (agent: Agent): Promise<{ rules: Rules, spentTodaySats: number, remainingTodaySats: number, day: string, vault: VaultBalance }> {
+  async budget (agent: Agent): Promise<BudgetView> {
     const now = this.now()
     const rules = await this.store.getRules(agent.id)
-    const spent = await this.store.spentSince(agent.id, dayStart(now))
+    const spentSats = await this.store.spentSince(agent.id, dayStart(now))
+    const q = await this.quote()
+    const quote = freshQuote(q, now) ? q : undefined
+    const common = { rules, spentTodaySats: spentSats, rate: quote ?? null, day: new Date(dayStart(now)).toISOString().slice(0, 10), vault: await this.vault.balance(agent.id) }
+    if (!isEur(rules)) return { ...common, currency: 'SAT', remainingTodaySats: Math.max(0, rules.dailyBudgetSats - spentSats) }
+    const spentCents = await this.spentToday(agent.id, rules, now, quote)
+    const remainingCents = Math.max(0, rules.dailyBudgetCents - spentCents)
     return {
-      rules,
-      spentTodaySats: spent,
-      remainingTodaySats: Math.max(0, rules.dailyBudgetSats - spent),
-      day: new Date(dayStart(now)).toISOString().slice(0, 10),
-      vault: await this.vault.balance(agent.id)
+      ...common,
+      currency: 'EUR',
+      spentTodayCents: spentCents,
+      remainingTodayCents: remainingCents,
+      remainingTodaySats: quote === undefined ? 0 : Math.floor(centsToSats(remainingCents, quote.rate))
     }
   }
 
@@ -475,7 +538,8 @@ export class SpendControl {
 /** request.created: what was asked, by whom, at what price (never the request body). */
 async function logCreated (audit: AuditLog, r: PaymentRequestRecord): Promise<void> {
   await audit.append(`agent:${r.agentId}`, 'request.created', {
-    requestId: r.id, agentId: r.agentId, url: r.url, method: r.method, purpose: r.purpose, priceSats: r.priceSats, status: r.status
+    requestId: r.id, agentId: r.agentId, url: r.url, method: r.method, purpose: r.purpose, priceSats: r.priceSats, status: r.status,
+    eurCents: r.eurCents ?? undefined, eurRate: r.eurRate ?? undefined, rateSource: r.rateSource ?? undefined
   })
 }
 

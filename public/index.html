@@ -112,9 +112,10 @@
     <div><strong>Rules for <span id="rules-agent"></span></strong></div>
     <form id="rules-form" class="grid" style="margin-top:12px">
       <label>Allowed hosts (comma-separated) <input name="allowedHosts" placeholder="api.example.com, localhost:5080"></label>
-      <label>Max per payment (sats) <input name="maxPerPaymentSats" type="number" min="0" step="1" required></label>
-      <label>Daily budget (sats) <input name="dailyBudgetSats" type="number" min="0" step="1" required></label>
-      <label>Approval threshold (sats) <input name="approvalThresholdSats" type="number" min="0" step="1" required></label>
+      <label>Currency <select name="currency"><option value="SAT">sats</option><option value="EUR">euros (€)</option></select></label>
+      <label>Max per payment (<span data-unit>sats</span>) <input name="maxPerPayment" type="number" min="0" step="1" required></label>
+      <label>Daily budget (<span data-unit>sats</span>) <input name="dailyBudget" type="number" min="0" step="1" required></label>
+      <label>Approval threshold (<span data-unit>sats</span>) <input name="approvalThreshold" type="number" min="0" step="1" required></label>
     </form>
     <div class="actions">
       <button id="rules-save" class="primary">Save rules</button>
@@ -127,13 +128,14 @@
     <form id="new-agent" class="grid" style="margin-top:12px">
       <label>Name <input name="name" required maxlength="100" placeholder="travel-bot"></label>
       <label>Allowed hosts (comma-separated) <input name="allowedHosts" placeholder="api.example.com, localhost:5080"></label>
-      <label>Max per payment (sats) <input name="maxPerPaymentSats" type="number" min="0" step="1" value="10000" required></label>
-      <label>Daily budget (sats) <input name="dailyBudgetSats" type="number" min="0" step="1" value="50000" required></label>
-      <label>Approval threshold (sats) <input name="approvalThresholdSats" type="number" min="0" step="1" value="1000" required></label>
+      <label>Currency <select name="currency"><option value="SAT">sats</option><option value="EUR">euros (€)</option></select></label>
+      <label>Max per payment (<span data-unit>sats</span>) <input name="maxPerPayment" type="number" min="0" step="1" value="10000" required></label>
+      <label>Daily budget (<span data-unit>sats</span>) <input name="dailyBudget" type="number" min="0" step="1" value="50000" required></label>
+      <label>Approval threshold (<span data-unit>sats</span>) <input name="approvalThreshold" type="number" min="0" step="1" value="1000" required></label>
     </form>
     <div class="actions">
       <button id="create" class="primary">Create agent</button>
-      <span class="muted hint">Payments above the threshold need your approval: you fund each one from your wallet.</span>
+      <span class="muted hint">Payments above the threshold need your approval: you fund each one from your wallet. Euro limits are checked at the BSV/EUR rate at payment time; payments stay in sats.</span>
     </div>
   </div>
 
@@ -144,8 +146,9 @@
   </table></div>
 
   <h2>Ledger <span id="total" class="muted"></span></h2>
+  <div id="rate" class="muted hint"></div>
   <div class="table"><table>
-    <thead><tr><th>Paid</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th>Status</th><th>Transaction</th></tr></thead>
+    <thead><tr><th>Paid</th><th>Agent</th><th>Purpose</th><th>URL</th><th class="num">Sats</th><th class="num">€ at payment</th><th>Status</th><th>Transaction</th></tr></thead>
     <tbody id="ledger"></tbody>
   </table></div>
 
@@ -190,6 +193,7 @@
   // Built by `npm run build:web` from src/shared/fingerprint.ts (the agent and vault.html use the same function).
   import { fingerprint } from './fingerprint.js'
   import { setupCommand } from './setup-command.js'
+  import { formatEur, formToRules, rateLine, rulesSummary, rulesToForm } from './rules-form.js'
 
   // The admin token lives in sessionStorage only, so it is gone when the tab closes.
   // Agent API keys are never stored anywhere in the browser.
@@ -211,17 +215,22 @@
     return body
   }
 
-  /** Rules from a form; the proxy validates them again. */
+  const LIMIT_FIELDS = ['maxPerPayment', 'dailyBudget', 'approvalThreshold']
+
+  /** Rules from a form (euros are sent as cents); the proxy validates them again. */
   function rulesFrom (form) {
     const f = new FormData(form)
-    const sats = name => Number(f.get(name))
-    return {
-      allowedHosts: String(f.get('allowedHosts') || '').split(',').map(h => h.trim()).filter(h => h !== ''),
-      maxPerPaymentSats: sats('maxPerPaymentSats'),
-      dailyBudgetSats: sats('dailyBudgetSats'),
-      approvalThresholdSats: sats('approvalThresholdSats')
-    }
+    const field = name => String(f.get(name) || '')
+    return formToRules({ currency: field('currency'), allowedHosts: field('allowedHosts'), ...Object.fromEntries(LIMIT_FIELDS.map(k => [k, field(k)])) })
   }
+
+  /** Units and input steps follow the currency: whole sats, or euros with cents. */
+  function showCurrency (form) {
+    const eur = form.elements.currency.value === 'EUR'
+    for (const u of form.querySelectorAll('[data-unit]')) u.textContent = eur ? '€' : 'sats'
+    for (const k of LIMIT_FIELDS) form.elements[k].step = eur ? '0.01' : '1'
+  }
+  for (const id of ['rules-form', 'new-agent']) $(id).elements.currency.addEventListener('change', () => { showCurrency($(id)) })
 
   let agents = []
   let anchoring = false
@@ -315,7 +324,7 @@
           <td>${a.status !== 'active' ? '<span class="muted">key revoked</span>' : a.connected ? `<span class="mono">${esc(a.key)}</span>` : '<span class="muted">not connected</span>'}</td>
           <td>${a.vault.agentPub ? `<span class="fp">${esc(fpOf(a.vault.agentPub))}</span>` : '<span class="muted">not registered yet</span>'}</td>
           <td class="rules">hosts: <span class="mono">${esc(a.rules.allowedHosts.join(', ') || 'none')}</span><br>
-            max ${esc(a.rules.maxPerPaymentSats)} · daily ${esc(a.rules.dailyBudgetSats)} · approval above ${esc(a.rules.approvalThresholdSats)} sats</td>
+            ${esc(rulesSummary(a.rules))}</td>
           <td>${esc(VAULT_STATUS[a.vault.status] ?? a.vault.status)}${a.vault.status === 'open' ? `<br><span class="mono">${esc(a.vault.satoshis)} sats</span>` : ''}${a.vault.covenant == null || a.vault.status !== 'open' ? '' : `<br><span class="muted hint">v2 covenant: max ${esc(a.vault.covenant.maxSats)} sats per payment, fee at most ${esc(a.vault.covenant.maxFeeSats)} sats, change locked to the vault</span>`}</td>
           <td class="agent-actions">${agentActions(a)}</td></tr>`).join('')
   }
@@ -327,7 +336,8 @@
         api($('show-deleted').checked ? '/admin/agents?deleted=1' : '/admin/agents'), api('/admin/requests?status=pending'), api('/admin/ledger'), api('/admin/audit?limit=15'),
         api('/admin/audit/verify'), api('/admin/audit/head')
       ])
-      // Own catch: an older proxy without /admin/notary must not break the rest of the page.
+      // Own catches: an older proxy without /admin/notary or /admin/rate must not break the rest of the page.
+      api('/admin/rate').then(r => { $('rate').textContent = rateLine(r) }).catch(err => { $('rate').textContent = `BSV/EUR rate: ${err.message}` })
       api('/admin/notary').then(renderNotary).catch(err => { $('notary-status').textContent = `Notary: ${err.message}` })
       agents = list
       renderAgents()
@@ -337,15 +347,17 @@
         ? '<tr><td colspan="7" class="muted">Nothing waiting.</td></tr>'
         : requests.map(r => `<tr>
             <td class="mono">${esc(r.requestId)}</td><td>${esc(r.agentName)}</td><td>${esc(r.purpose)}</td>
-            <td class="url mono">${esc(r.method)} ${esc(r.url)}</td><td class="num">${esc(r.satoshis)}</td><td>${esc(time(r.createdAt))}</td>
+            <td class="url mono">${esc(r.method)} ${esc(r.url)}</td><td class="num">${esc(r.satoshis)}${r.eurCents === undefined ? '' : `<br><span class="muted">${esc(formatEur(r.eurCents))}</span>`}</td><td>${esc(time(r.createdAt))}</td>
             <td><a class="approve" href="vault.html?approve=${encodeURIComponent(r.requestId)}" title="Approving means funding this payment from your wallet">Approve and fund</a>
                 <button class="deny" data-id="${esc(r.requestId)}" data-action="deny">Deny</button></td></tr>`).join('')
-      $('total').textContent = `· ${ledger.totalSats} sats on ${ledger.network === 'test' ? 'testnet' : 'mainnet'}`
+      $('total').textContent = `· ${ledger.totalSats} sats on ${ledger.network === 'test' ? 'testnet' : 'mainnet'}` +
+        (ledger.totalEurCents > 0 ? ` (${formatEur(ledger.totalEurCents)} at payment time, where a rate was recorded)` : '')
       $('ledger').innerHTML = ledger.entries.length === 0
-        ? '<tr><td colspan="7" class="muted">No payments yet.</td></tr>'
+        ? '<tr><td colspan="8" class="muted">No payments yet.</td></tr>'
         : ledger.entries.map(e => `<tr>
             <td>${esc(time(e.paidAt))}</td><td>${esc(e.agentName)}</td><td>${esc(e.purpose)}</td>
             <td class="url mono">${esc(e.method)} ${esc(e.url)}</td><td class="num">${esc(e.satoshis)}</td>
+            <td class="num"${e.eurRate === undefined ? '' : ` title="1 BSV = ${esc(e.eurRate)} € (${esc(e.rateSource)})"`}>${e.eurCents === undefined ? '' : esc(formatEur(e.eurCents))}</td>
             <td class="status-${esc(e.status)}">${esc(e.status.replaceAll('_', ' '))}</td>
             <td class="mono">${e.explorerUrl ? `<a href="${esc(e.explorerUrl)}" target="_blank" rel="noopener">${esc(e.txid.slice(0, 12))}…</a>` : ''}</td></tr>`).join('')
     } catch (err) {
@@ -401,6 +413,7 @@
       const created = await api('/admin/agents', { method: 'POST', body: JSON.stringify({ name, rules: rulesFrom(form) }) })
       showCode(`${created.name} (${created.id})`, created)
       form.reset()
+      showCurrency(form)
     } catch (err) {
       $('error').textContent = err.message
     } finally {
@@ -482,10 +495,8 @@
     if (!agent) return
     editing = agent.id
     const form = $('rules-form')
-    form.elements.allowedHosts.value = agent.rules.allowedHosts.join(', ')
-    form.elements.maxPerPaymentSats.value = agent.rules.maxPerPaymentSats
-    form.elements.dailyBudgetSats.value = agent.rules.dailyBudgetSats
-    form.elements.approvalThresholdSats.value = agent.rules.approvalThresholdSats
+    for (const [k, v] of Object.entries(rulesToForm(agent.rules))) form.elements[k].value = v
+    showCurrency(form)
     $('rules-agent').textContent = `${agent.name} (${agent.id})`
     $('rules-box').hidden = false
     $('rules-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
