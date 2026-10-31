@@ -34,6 +34,56 @@ OP_ELSE <companyPub> OP_CHECKSIG                                 reclaim: compan
 OP_ENDIF
 ```
 
+### Vault v2: a covenant every node enforces (`VAULT_COVENANT=true`)
+
+With v1, the payment's shape is checked by the agent's signer and by the proxy: what the agent and the policy both
+sign is valid. With `VAULT_COVENANT=true` on the proxy, **new** agent vaults are v2 (`src/vault/covenant.ts`). The
+agent + policy branch then also carries an OP_PUSH_TX covenant, so the network itself refuses any other payment
+shape. The default is off. v1 vaults keep working as they are, and request vaults stay v1 (they are funded for
+exactly one payment anyway).
+
+```
+OP_IF   OP_2SWAP <agentPub> OP_CHECKSIGVERIFY <policyPub> OP_CHECKSIGVERIFY <covenant>
+OP_ELSE <companyPub> OP_CHECKSIG                                 reclaim: company alone, exactly as v1
+OP_ENDIF
+spend:   <sigPolicy> <sigAgent> <outputsBlob> <preimage> OP_1
+reclaim: <sigCompany> OP_0
+```
+
+**Safety first:** the reclaim branch has no covenant, so a bug in the covenant can never lock the funds; the company
+can always take them back. The tests check that in every situation they build, valid or not.
+
+What the covenant enforces on every spend through the agent + policy branch:
+
+- **Output 0** carries at most `MAX_SATS`. That is the agent's `maxPerPaymentSats` when the vault was funded, written
+  into the script; to raise it, reclaim and fund again.
+- **Then, optionally, the change**, locked to this very vault script.
+- **Then, optionally and last, the 0-sat `agenttresor-audit` anchor.**
+- **Nothing else.**
+- **The fee** (input value − output 0 − change) is at most `MAX_FEE`: `VAULT_COVENANT_MAX_FEE_SATS`, 1,000 sats by
+  default, also written into the script. So a payment without change is only possible once the vault holds at most
+  `MAX_SATS + MAX_FEE`. Nobody can send the rest of a vault to the miners, not even the agent and the policy
+  together.
+
+How it works:
+
+- **OP_PUSH_TX** (nChain's technique, as in sCrypt's `Tx.checkPreimage`): the script turns the pushed BIP-143 preimage
+  into an ECDSA signature with private key 1 and nonce 1, `s = hash256(preimage) + Gx mod n`, and checks it against
+  `G`. The node only accepts that signature for the real preimage.
+- **Grinding:** the proxy changes `nLockTime` (every input has nSequence `0xffffffff`, so it has no effect) until `s`
+  is exactly 32 bytes and low-S; the script requires that form. It takes about 2 tries on average.
+- **Checking the outputs:** the script checks `hash256(outputsBlob)` against the preimage's `hashOutputs`, then reads
+  the outputs.
+
+The agent's signer accepts v2 vaults and refuses a price above `MAX_SATS` or a fee above `MAX_FEE`. The proxy
+refuses such a payment before building anything. `/vault.html` and the dashboard show *v2 covenant: max N sats per
+payment, fee at most F sats, change locked to the vault*.
+
+Cost: the script is 741 bytes (v1: 108), and the unlocking script carries the outputs and the preimage. At 100 sat/kB
+a payment costs about 283 sats in fees instead of 43, so **+240 sats per payment**. That is well under the 1,000-sat
+fee cap, which leaves room if fee rates rise. If they rise past it, v2 payments stop until the vault is reclaimed
+and funded again with a higher cap; the reclaim always works.
+
 ## How a payment works
 
 The company creates the agent on the dashboard (`/`: name and rules) and gives it a one-time connection code. The
@@ -309,7 +359,7 @@ a reverse proxy, so the rate limit on `POST /v1/connect` (10 attempts per IP per
 - `src/shared/wallet.ts` — wallet-toolbox server wallet with Arcade as primary broadcaster (used by the demo merchant)
 - `src/merchant/` — demo merchant selling to agents with BRC-121: `GET /api/catalog` (free), `GET /api/report` (fixed
   price), `POST /api/hotel/book` (nights x room rate)
-- `src/vault/` — the vault: `script.ts` (locking/unlocking scripts, BIP-143 signing), `builder.ts` (payment tx, fee
+- `src/vault/` — the vault: `script.ts` (locking/unlocking scripts, BIP-143 signing), `covenant.ts` (v2: OP_PUSH_TX covenant, nLockTime grinding), `builder.ts` (payment tx, fee
   at 100 sat/kB), `service.ts` (funding check by SPV, payment build/finalize), `broadcaster.ts` (Arcade)
 - `src/proxy/` — spend-control proxy: agent API (`/v1/…`, Bearer `agt_…`), rules (`rules.ts`: allowed hosts, max per
   payment, daily budget, approval threshold), approvals, ledger in `./data/proxy.sqlite`. Admin API under `/admin`

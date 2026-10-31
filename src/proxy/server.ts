@@ -2,6 +2,8 @@
  * Spend-control proxy: `npm run proxy`.
  * Env: PROXY_ROOT_KEY (64 hex chars), ADMIN_TOKEN (>= 16 chars), PROXY_PORT (default 5050), BSV_NETWORK,
  * PROXY_PUBLIC_URL (e.g. https://agentpay.example, for connection links), TRUST_PROXY=1 behind a reverse proxy.
+ * Vaults: VAULT_COVENANT=true makes NEW agent vaults v2 (OP_PUSH_TX covenant; default false),
+ * VAULT_COVENANT_MAX_FEE_SATS (1000) caps their fee per payment.
  * Anchoring: AUTO_ANCHOR_PAYMENTS (default true), AUTO_ANCHOR_NOTARY (default true), NOTARY_ROOT_KEY
  * (64 hex chars; missing = no notary), ANCHOR_IDLE_MS (120000), NOTARY_LOW_ANCHORS (20), NOTARY_MAX_SATS (1000000).
  *
@@ -67,6 +69,9 @@ const app = createProxyApp({
   publicUrl: process.env.PROXY_PUBLIC_URL === undefined || process.env.PROXY_PUBLIC_URL === '' ? undefined : process.env.PROXY_PUBLIC_URL,
   trustProxy: process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true',
   anchorPayments: flag('AUTO_ANCHOR_PAYMENTS', true),
+  vaultCovenant: flag('VAULT_COVENANT', false),
+  vaultCovenantMaxFeeSats: positiveInt('VAULT_COVENANT_MAX_FEE_SATS', 1_000),
+  log,
   notaryDisabledReason,
   notary: notaryWallet === undefined
     ? undefined

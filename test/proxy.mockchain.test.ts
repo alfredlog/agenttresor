@@ -241,12 +241,12 @@ describe('authentication', () => {
       connected: true,
       createdAt: expect.any(String),
       rules: { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 },
-      vault: { status: 'no_key', satoshis: 0, agentPub: null }
+      vault: { status: 'no_key', satoshis: 0, agentPub: null, covenant: null }
     })
     // An agent with a funded vault shows its status, balance and public signing key.
     const funded = await h.createAgent('listed-bot', { allowedHosts: [merchantHost], maxPerPaymentSats: 1_000, dailyBudgetSats: 2_000, approvalThresholdSats: 500 }, 3_000)
     const listedFunded = (await h.admin('/admin/agents')).body.agents.find((x: any) => x.id === funded.id)
-    expect(listedFunded.vault).toEqual({ status: 'open', satoshis: 3_000, agentPub: funded.signer.toPublicKey().toString() })
+    expect(listedFunded.vault).toEqual({ status: 'open', satoshis: 3_000, agentPub: funded.signer.toPublicKey().toString(), covenant: null })
   })
 
   it('refuses admin routes without the admin token (401)', async () => {
