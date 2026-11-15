@@ -190,7 +190,14 @@ async function run (button: HTMLButtonElement, task: () => Promise<void | false>
   button.classList.remove('done')
   button.classList.add('loading')
   let succeeded = false
-  try { succeeded = await task() !== false } catch (err) { log(esc((err as Error).message), 'error') } finally {
+  try {
+    succeeded = await task() !== false
+  } catch (err) {
+    // Newest first: the hint lands just below its error.
+    const hint = (err as { hint?: unknown }).hint
+    if (typeof hint === 'string') log(`Hint: ${esc(hint)}`, 'info')
+    log(esc((err as Error).message), 'error')
+  } finally {
     button.disabled = false
     button.classList.remove('loading')
   }

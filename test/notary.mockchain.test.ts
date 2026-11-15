@@ -14,7 +14,7 @@ import { anchorAuditHead } from '../src/company/audit-client'
 import { topUpNotary } from '../src/company/notary-client'
 import { createMerchantApp, REPORT_PRICE_SATS } from '../src/merchant/app'
 import { DashboardNotifier, type Notifier } from '../src/proxy/notifier'
-import { ADMIN_TOKEN, createProxyHarness, type ProxyHarness } from './helpers/proxy'
+import { ADMIN_TOKEN, createProxyHarness, offlineChain, type ProxyHarness } from './helpers/proxy'
 
 const IDLE_MS = 10_000 // shorter than the 20 s signing window, so a payment can be "in flight" while the log is idle
 
@@ -194,7 +194,7 @@ describe('payments anchor the log; the notary waits for them', () => {
       const { createProxyApp } = await import('../src/proxy/app')
       const url = await plain.listen(createProxyApp({
         db: plain.db, policyRootKey: plain.policyRootKey, chainTracker: plain.chain.chainTracker, broadcaster: plain.chain.broadcaster,
-        notifier: new DashboardNotifier(), adminToken: ADMIN_TOKEN, network: 'test', anchorPayments: false
+        notifier: new DashboardNotifier(), adminToken: ADMIN_TOKEN, network: 'test', anchorPayments: false, beefFromChain: offlineChain
       }))
       expect((await fetch(`${url}/admin/notary`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } }).then(async r => await r.json()))).toMatchObject({ enabled: false })
       // Same database, so an agent made through the harness proxy pays through this one.

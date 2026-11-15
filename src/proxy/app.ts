@@ -11,7 +11,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import express, { type Express, type NextFunction, type Request, type Response } from 'express'
 import type { Knex } from 'knex'
-import { getNetwork, txLink, type BsvNetwork } from '../shared/network.js'
+import { beefFromArcade } from '../shared/arcade.js'
+import { arcadeUrl, getNetwork, txLink, type BsvNetwork } from '../shared/network.js'
 import { agentKeyHint, generateAgentKey, hashAgentKey, isAgentKey, maskAgentKey } from './keys.js'
 import type { ChainTracker, PrivateKey, WalletInterface } from '../shared/bsv.js'
 import type { Broadcaster } from '../vault/broadcaster.js'
@@ -55,6 +56,11 @@ export interface ProxyAppOptions {
   vaultCovenantMaxFeeSats?: number
   /** The BSV/EUR rate (CoinGecko in the server): needed by EUR rules; without it, EUR payments are denied. */
   rates?: RateProvider
+  /**
+   * A BEEF for a transaction as the network knows it now, so old vaults are
+   * served with a mined BEEF (default: Arcade of `network`). Tests inject one.
+   */
+  beefFromChain?: (txid: string) => Promise<number[]>
   /** Operational log lines (no secrets). */
   log?: (msg: string) => void
   /** The operator's notary wallet (option B): anchors the log when it is idle. Without it there is no idle anchoring. */
@@ -162,6 +168,7 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
         return { maxSats, maxFeeSats: opts.vaultCovenantMaxFeeSats ?? DEFAULT_COVENANT_MAX_FEE_SATS }
       }
       : undefined,
+    beefFromChain: opts.beefFromChain ?? (async txid => await beefFromArcade(txid, arcadeUrl(network))),
     log: opts.log
   })
   const control = new SpendControl({ store, vault, audit, notifier: opts.notifier, now, rates: opts.rates })
@@ -577,8 +584,14 @@ export function createProxyApp (opts: ProxyAppOptions): Express {
 
   app.use('/admin', admin)
 
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (err instanceof ProxyError) { res.status(err.httpStatus).json({ ...err.details, error: err.message }); return }
+  const log = opts.log ?? ((msg: string) => { console.log(msg) })
+  app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof ProxyError) {
+      // One line per refused request: never the Authorization header or a body.
+      if (err.httpStatus >= 400 && err.httpStatus < 500) log(`${req.method} ${req.path} ${err.httpStatus}: ${err.message}`)
+      res.status(err.httpStatus).json({ ...err.details, error: err.message })
+      return
+    }
     const status = (err as { status?: number }).status
     if (status === 400 || status === 413) { res.status(status).json({ error: 'invalid request body' }); return }
     console.error('proxy error:', err instanceof Error ? err.message : String(err))
