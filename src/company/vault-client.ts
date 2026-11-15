@@ -16,6 +16,43 @@ import { isFingerprint, requireConfirmedFingerprint } from '../shared/fingerprin
 import { covenantLockingScript, parseVaultSource } from '../vault/covenant.js'
 import { reclaimUnlockingScript, RECLAIM_UNLOCK_LENGTH, vaultLockingScript, vaultSighash } from '../vault/script.js'
 
+/**
+ * A wallet call that failed, with the clearest message we have. Over BSV
+ * Desktop (HTTPWalletJSON) a failure often reports only its HTTP status; the
+ * wallet's own reason is then only in the response body, so `hint` says where
+ * to find it.
+ */
+export class WalletCallError extends Error {
+  constructor (readonly call: string, message: string, readonly hint?: string) {
+    super(message)
+    this.name = 'WalletCallError'
+  }
+}
+
+/** Turns any error of the wallet call `call` into a WalletCallError. */
+export function walletCallError (call: string, err: unknown): WalletCallError {
+  if (err instanceof WalletCallError) return err
+  const e = (err ?? {}) as { message?: unknown, code?: unknown, name?: unknown }
+  const raw = typeof e.message === 'string' && e.message !== '' ? e.message : String(err)
+  const code = typeof e.code === 'string' && /^WERR_/.test(e.code)
+    ? e.code
+    : typeof e.name === 'string' && /^WERR_/.test(e.name) ? e.name : undefined
+  const hint = `open DevTools > Network > ${call} > Response for details`
+  const status = /failed with HTTP status (\d+)/.exec(raw)?.[1]
+  if (status !== undefined) return new WalletCallError(call, `the wallet refused ${call} (HTTP ${status}) without saying why`, hint)
+  let message = `the wallet refused ${call}: ${raw}${code !== undefined && !raw.includes(code) ? ` (${code})` : ''}`
+  if (/merged Beef failed validation/i.test(raw)) message += '; the vault\'s stored transaction data is older than what the wallet knows: reload the page and try again'
+  return new WalletCallError(call, message, code === 'WERR_INTERNAL' ? hint : undefined)
+}
+
+async function walletCall<T> (call: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    throw walletCallError(call, err)
+  }
+}
+
 export interface ProxyAdmin {
   proxyUrl: string
   adminToken: string
@@ -74,16 +111,16 @@ export async function fundVault (
   const id = encodeURIComponent(agentId)
   const params = await getVaultParams(proxyUrl, adminToken, agentId)
   requireConfirmedFingerprint(params.agentPub, confirmedFingerprint)
-  const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: params.protocolID, keyID: params.keyID, counterparty: 'self' })
+  const { publicKey: companyPub } = await walletCall('getPublicKey', async () => await wallet.getPublicKey({ protocolID: params.protocolID, keyID: params.keyID, counterparty: 'self' }))
   const keys = { agentPub: params.agentPub, policyPub: params.policyPub, companyPub }
   // v2 keeps the company's reclaim branch exactly as v1: the covenant only binds the agent + policy branch.
   const lockingScript = (params.covenant == null ? vaultLockingScript(keys) : covenantLockingScript({ ...keys, ...params.covenant })).toHex()
 
-  const created = await wallet.createAction({
+  const created = await walletCall('createAction', async () => await wallet.createAction({
     description: `Fund AgentTresor vault ${agentId}`.slice(0, 50),
     outputs: [{ lockingScript, satoshis: sats, outputDescription: 'AgentTresor vault' }],
     options: { randomizeOutputs: false, acceptDelayedBroadcast: false }
-  })
+  }))
   if (created.tx === undefined || created.txid === undefined) throw new Error('the wallet did not create the funding transaction')
   // Find the vault output by its locking script, never by position.
   const vout = Transaction.fromAtomicBEEF(created.tx).outputs.findIndex(o => o.lockingScript.toHex() === lockingScript)
@@ -125,14 +162,14 @@ export async function approveAndFund (
   const id = encodeURIComponent(requestId)
   const a = await getApproval(proxyUrl, adminToken, requestId)
   requireConfirmedFingerprint(a.agentPub, confirmedFingerprint)
-  const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: a.protocolID, keyID: a.keyID, counterparty: 'self' })
+  const { publicKey: companyPub } = await walletCall('getPublicKey', async () => await wallet.getPublicKey({ protocolID: a.protocolID, keyID: a.keyID, counterparty: 'self' }))
   const lockingScript = vaultLockingScript({ agentPub: a.agentPub, policyPub: a.policyPub, companyPub }).toHex()
 
-  const created = await wallet.createAction({
+  const created = await walletCall('createAction', async () => await wallet.createAction({
     description: `Approve AgentTresor payment ${requestId}`.slice(0, 50),
     outputs: [{ lockingScript, satoshis: a.totalSats, outputDescription: `Approved payment ${requestId}`.slice(0, 50) }],
     options: { randomizeOutputs: false, acceptDelayedBroadcast: false }
-  })
+  }))
   if (created.tx === undefined || created.txid === undefined) throw new Error('the wallet did not create the approval transaction')
   // Find the request vault output by its locking script, never by position.
   const vout = Transaction.fromAtomicBEEF(created.tx).outputs.findIndex(o => o.lockingScript.toHex() === lockingScript)
@@ -165,18 +202,18 @@ async function reclaim (wallet: WalletInterface, admin: ProxyAdmin, utxoPath: st
   const utxo = await proxyCall<ReclaimableUtxo>(admin, utxoPath)
 
   // Check the script really is our vault before signing anything for it.
-  const { publicKey: companyPub } = await wallet.getPublicKey({ protocolID: utxo.protocolID, keyID: utxo.keyID, counterparty: 'self' })
+  const { publicKey: companyPub } = await walletCall('getPublicKey', async () => await wallet.getPublicKey({ protocolID: utxo.protocolID, keyID: utxo.keyID, counterparty: 'self' }))
   if (parseVaultSource(utxo.lockingScript)?.companyPub !== companyPub) throw new Error('this vault is not locked to the company key')
   const lockingScript = LockingScript.fromHex(utxo.lockingScript)
 
   // No outputs: the wallet's change output takes the funds back.
-  const created = await wallet.createAction({
+  const created = await walletCall('createAction', async () => await wallet.createAction({
     description: `Reclaim AgentTresor ${label}`.slice(0, 50),
     inputBEEF: Utils.toArray(utxo.beef, 'hex'),
     inputs: [{ outpoint: utxo.outpoint, unlockingScriptLength: RECLAIM_UNLOCK_LENGTH, inputDescription: 'AgentTresor vault' }],
     outputs: [],
     options: { signAndProcess: false, randomizeOutputs: false, acceptDelayedBroadcast: false }
-  })
+  }))
   const signable = created.signableTransaction
   if (signable === undefined) throw new Error('the wallet did not return a transaction to sign')
 
@@ -185,18 +222,18 @@ async function reclaim (wallet: WalletInterface, admin: ProxyAdmin, utxoPath: st
   const index = tx.inputs.findIndex(i => (i.sourceTXID ?? i.sourceTransaction?.id('hex')) === txid && i.sourceOutputIndex === Number(vout))
   if (index === -1) throw new Error('vault input not found in the reclaim transaction')
 
-  const { signature } = await wallet.createSignature({
+  const { signature } = await walletCall('createSignature', async () => await wallet.createSignature({
     hashToDirectlySign: vaultSighash(tx, index, utxo.satoshis, lockingScript),
     protocolID: utxo.protocolID,
     keyID: utxo.keyID,
     counterparty: 'self'
-  })
+  }))
   const unlockingScript = reclaimUnlockingScript(Signature.fromDER(Array.from(signature)))
-  const signed = await wallet.signAction({
+  const signed = await walletCall('signAction', async () => await wallet.signAction({
     reference: signable.reference,
     spends: { [index]: { unlockingScript: unlockingScript.toHex() } },
     options: { acceptDelayedBroadcast: false }
-  })
+  }))
   const reclaimTxid = signed.txid ?? (signed.tx === undefined ? undefined : Transaction.fromAtomicBEEF(signed.tx).id('hex'))
   if (reclaimTxid === undefined) throw new Error('the wallet did not sign the reclaim transaction')
 

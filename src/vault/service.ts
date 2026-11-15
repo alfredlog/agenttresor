@@ -65,8 +65,17 @@ export interface VaultServiceOptions {
    * (no exchange rate). Request vaults stay v1.
    */
   covenantCaps?: (agentId: string) => Promise<CovenantCaps | undefined>
+  /**
+   * A BEEF for a transaction as the network knows it now (production:
+   * beefFromArcade). Used to replace a vault's stored funding-time BEEF once
+   * the transaction is mined; without it the stored BEEF is always served.
+   */
+  beefFromChain?: (txid: string) => Promise<number[]>
   log?: (msg: string) => void
 }
+
+/** How long a fresh-BEEF lookup may take before the stored BEEF is used instead. */
+const FRESH_BEEF_TIMEOUT_MS = 5_000
 
 const isCompressedPubHex = (v: unknown): v is string => typeof v === 'string' && /^0[23][0-9a-f]{64}$/.test(v)
 
@@ -127,6 +136,7 @@ export class VaultService {
   private readonly covenantCaps: (agentId: string) => Promise<CovenantCaps | undefined>
   /** New vaults are v2 (whatever caps the company's script chose). */
   private readonly covenantEnabled: boolean
+  private readonly beefFromChain: ((txid: string) => Promise<number[]>) | undefined
   private readonly log: (msg: string) => void
 
   constructor (opts: VaultServiceOptions) {
@@ -139,6 +149,7 @@ export class VaultService {
     this.anchorPayments = opts.anchorPayments ?? true
     this.covenantCaps = opts.covenantCaps ?? (async () => undefined)
     this.covenantEnabled = opts.covenantCaps !== undefined
+    this.beefFromChain = opts.beefFromChain
     this.log = opts.log ?? (() => {})
   }
 
@@ -280,7 +291,7 @@ export class VaultService {
       outpoint: `${rv.txid}.${rv.vout}`,
       satoshis: rv.satoshis,
       lockingScript: rv.lockingScript,
-      beef: rv.beefHex,
+      beef: await this.freshRequestVaultBeef(rv),
       protocolID: VAULT_PROTOCOL,
       keyID: vaultKeyId(rv.agentId)
     }
@@ -309,7 +320,7 @@ export class VaultService {
       outpoint: `${vault.txid!}.${vault.vout!}`,
       satoshis: vault.satoshis!,
       lockingScript: vault.lockingScript!,
-      beef: vault.beefHex!,
+      beef: await this.freshVaultBeef(vault),
       protocolID: VAULT_PROTOCOL,
       keyID: vaultKeyId(agentId)
     }
@@ -568,11 +579,68 @@ export class VaultService {
     const rv = await this.store.getRequestVault(requestId)
     if (rv !== undefined) {
       return rv.status === 'open' && rv.agentId === agentId
-        ? { kind: 'request', txid: rv.txid, vout: rv.vout, satoshis: rv.satoshis, lockingScript: rv.lockingScript, beefHex: rv.beefHex }
+        ? { kind: 'request', txid: rv.txid, vout: rv.vout, satoshis: rv.satoshis, lockingScript: rv.lockingScript, beefHex: await this.freshRequestVaultBeef(rv) }
         : undefined
     }
     if (vault?.status !== 'open') return undefined
-    return { kind: 'agent', txid: vault.txid!, vout: vault.vout!, satoshis: vault.satoshis!, lockingScript: vault.lockingScript!, beefHex: vault.beefHex! }
+    return { kind: 'agent', txid: vault.txid!, vout: vault.vout!, satoshis: vault.satoshis!, lockingScript: vault.lockingScript!, beefHex: await this.freshVaultBeef(vault) }
+  }
+
+  /** The agent vault's BEEF, refreshed (and saved) once its transaction is mined. */
+  private async freshVaultBeef (vault: Vault): Promise<string> {
+    const hex = await this.freshBeef(vault.txid!, vault.beefHex!)
+    if (hex !== vault.beefHex) {
+      // Only if the vault still sits on this outpoint (a payment may have moved it meanwhile).
+      const current = await this.store.getVault(vault.agentId)
+      if (current?.status === 'open' && current.txid === vault.txid) await this.store.updateVault(vault.agentId, { beefHex: hex })
+    }
+    return hex
+  }
+
+  /** The request vault's BEEF, refreshed (and saved) once its transaction is mined. */
+  private async freshRequestVaultBeef (rv: RequestVault): Promise<string> {
+    const hex = await this.freshBeef(rv.txid, rv.beefHex)
+    if (hex !== rv.beefHex) await this.store.updateRequestVault(rv.requestId, { beefHex: hex })
+    return hex
+  }
+
+  /**
+   * The BEEF stored at funding time holds the vault transaction as unmined,
+   * with its whole unconfirmed ancestry. Weeks later the company's wallet knows
+   * those transactions as mined, and merging both versions fails validation
+   * ("merged Beef failed validation"). So once the transaction is mined, serve
+   * a BEEF with its merkle path instead. Any problem with the lookup (network,
+   * not mined yet, bad proof) falls back to the stored BEEF: never throws.
+   */
+  private async freshBeef (txid: string, storedHex: string): Promise<string> {
+    try {
+      if (Beef.fromString(storedHex, 'hex').findTxid(txid)?.hasProof === true) return storedHex
+    } catch {
+      return storedHex
+    }
+    if (this.beefFromChain === undefined) return storedHex
+    let timer: NodeJS.Timeout | undefined
+    try {
+      const bytes = await Promise.race([
+        this.beefFromChain(txid),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('timed out')), FRESH_BEEF_TIMEOUT_MS) })
+      ])
+      const beef = Beef.fromBinary(bytes)
+      const tx = beef.findAtomicTransaction(txid)
+      if (beef.findTxid(txid)?.hasProof !== true || tx?.merklePath === undefined) return storedHex
+      // Only a proof the chain tracker accepts replaces what was verified at funding.
+      if (!await tx.merklePath.verify(txid, this.chainTracker)) {
+        this.log(`vault ${txid}: the chain's merkle path did not verify; serving the stored BEEF`)
+        return storedHex
+      }
+      this.log(`vault ${txid}: mined; serving a fresh BEEF`)
+      return beef.toHex()
+    } catch (err) {
+      this.log(`vault ${txid}: no fresh BEEF (${errorMessage(err)}); serving the stored BEEF`)
+      return storedHex
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /** The merchant's BRC-29 output, derived exactly as @bsv/402-pay's client does it, with the proxy as sender. */

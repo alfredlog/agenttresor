@@ -6,7 +6,8 @@
  * it does not fetch missing parents itself, so a failed submit must be retried
  * before any child transaction is submitted.
  */
-import { Beef, MerklePath, Transaction, Utils } from '../shared/bsv.js'
+import { Beef, Transaction, Utils } from '../shared/bsv.js'
+import { beefFromArcade } from '../shared/arcade.js'
 import type { KitQuery, OutputContext } from './overlay/Bsv21KitLookupService'
 import { decodeBsv21 } from './inscription'
 
@@ -41,36 +42,8 @@ export const memoryOutbox = (): OutboxStore => {
 
 export const DEFAULT_ARCADE_URL = 'https://arcade-v2-us-1.bsvblockchain.tech'
 
-/**
- * Build a BEEF for `txid` from Arcade's GET /tx/:txid, which returns the raw
- * transaction (Extended Format) and, once mined, its merkle path. An unmined
- * transaction is completed by walking its parents until each is proven.
- */
-export async function beefFromArcade (txid: string, arcadeUrl = DEFAULT_ARCADE_URL): Promise<number[]> {
-  const seen = new Map<string, Transaction>()
-  const load = async (id: string, depth: number): Promise<Transaction> => {
-    const cached = seen.get(id)
-    if (cached !== undefined) return cached
-    if (depth > 25) throw new Error('unproven ancestry too deep')
-    const res = await fetch(`${arcadeUrl}/tx/${id}`)
-    if (!res.ok) throw new Error(`Arcade does not know ${id} (${res.status})`)
-    const info = await res.json() as { rawTx?: string, merklePath?: string }
-    if (info.rawTx === undefined || info.rawTx === '') throw new Error(`Arcade has no raw tx for ${id}`)
-    // Extended Format = version (4 bytes) followed by the marker 0000000000EF.
-    const isEF = info.rawTx.slice(8, 20).toLowerCase() === '0000000000ef'
-    const tx = isEF ? Transaction.fromHexEF(info.rawTx) : Transaction.fromHex(info.rawTx)
-    seen.set(id, tx)
-    if (info.merklePath !== undefined && info.merklePath !== '') {
-      tx.merklePath = MerklePath.fromHex(info.merklePath)
-    } else {
-      for (const input of tx.inputs) {
-        input.sourceTransaction = await load(input.sourceTXID ?? input.sourceTransaction!.id('hex'), depth + 1)
-      }
-    }
-    return tx
-  }
-  return (await load(txid, 0)).toBEEF()
-}
+// Moved to shared/arcade; re-exported so existing token imports keep working.
+export { beefFromArcade }
 
 /** Transient overlay errors (e.g. its chain tracker rate-limited) are retried this many times. */
 const MAX_ATTEMPTS = 5

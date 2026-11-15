@@ -17,6 +17,9 @@ import { DashboardNotifier, type Notifier } from '../../src/proxy/notifier'
 import { openProxyDb } from '../../src/proxy/store'
 import { createMockChain, type MockChain } from './mockchain'
 
+/** A beefFromChain that has no network: the vault service falls back to the stored BEEF. */
+export const offlineChain = async (): Promise<number[]> => { throw new Error('offline') }
+
 export const ADMIN_TOKEN = 'test-admin-token-0123456789'
 
 export interface Res { status: number, body: any }
@@ -59,7 +62,7 @@ export interface HarnessOptions {
   /** A wallet (on this harness's mock chain: pass a function) to use as the notary. */
   notary?: { wallet: (chain: MockChain) => Promise<Wallet>, config?: Partial<NotaryConfig>, log?: (msg: string) => void }
   /** Extra proxy options, e.g. { vaultCovenant: true } or a fake BSV/EUR rate. */
-  app?: Pick<ProxyAppOptions, 'vaultCovenant' | 'anchorPayments' | 'log' | 'rates'>
+  app?: Pick<ProxyAppOptions, 'vaultCovenant' | 'anchorPayments' | 'log' | 'rates' | 'beefFromChain'>
 }
 
 export async function createProxyHarness (opts: HarnessOptions = {}): Promise<ProxyHarness> {
@@ -87,6 +90,9 @@ export async function createProxyHarness (opts: HarnessOptions = {}): Promise<Pr
     now: () => Date.now() + clock.offset,
     // Every test connects from 127.0.0.1.
     connectRateLimit: { max: 10_000, windowMs: 60_000 },
+    // Offline: no Arcade, so vaults keep their stored BEEF unless a test injects a chain.
+    beefFromChain: offlineChain,
+    log: () => {},
     ...opts.app,
     notary: notaryWallet === undefined
       ? undefined
